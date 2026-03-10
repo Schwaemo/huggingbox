@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(claude mcp add huggingface --transport http https://huggingface.co/mcp/sse)",
+      "Bash(npx tsc --noEmit)",
+      "Bash(npx vite build)",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(cmd /c where npm)",
+      "Bash(cmd /c where node)",
+      "Bash(cmd /c where npx)",
+      "Bash(netstat -ano)",
+      "Bash(xargs -I{} taskkill /PID {} /F)"
+    ]
+  }
+}
