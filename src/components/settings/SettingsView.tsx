@@ -345,6 +345,35 @@ export default function SettingsView() {
           </Field>
         </div>
 
+        {/* Environment Storage */}
+        <div style={SECTION_STYLE}>
+          <h2 style={SECTION_TITLE}>Environment Storage</h2>
+          <Field
+            label="Python Environments Directory (optional)"
+            helper="Where isolated Python venvs are created per model. Leave blank to use the default AppData location."
+          >
+            <input
+              type="text"
+              value={settings.envStoragePath}
+              onChange={(e) => updateSettings({ envStoragePath: e.target.value })}
+              placeholder="e.g. D:\HuggingBox\envs  (blank = auto)"
+              style={{
+                width: '100%',
+                height: '36px',
+                backgroundColor: 'var(--bg-primary)',
+                border: '1px solid var(--border)',
+                borderRadius: '4px',
+                padding: '0 12px',
+                fontFamily: '"JetBrains Mono", monospace',
+                fontSize: '13px',
+                color: 'var(--text-primary)',
+                boxSizing: 'border-box',
+              }}
+            />
+          </Field>
+        </div>
+
+
         {/* Device */}
         <div style={SECTION_STYLE}>
           <h2 style={SECTION_TITLE}>Inference Device</h2>

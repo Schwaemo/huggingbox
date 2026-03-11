@@ -307,6 +307,8 @@ function WorkspaceLayout({ model, code, executionState, claudeAnalysis }: Worksp
       pipelineTag: model.pipeline_tag,
       preferredDevice: store.settings.preferredDevice,
       selectedGpuId: store.settings.selectedGpuId,
+      userInput: inputValue.trim() || undefined,
+      envStoragePath: store.settings.envStoragePath || undefined,
     });
   }
 

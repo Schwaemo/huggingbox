@@ -14,22 +14,24 @@ def main():
     parser = argparse.ArgumentParser(description="HuggingBox Auto Runner")
     parser.add_argument("command", choices=["run", "generate"], help="Command to execute")
     parser.add_argument("model_id", help="Hugging Face Model ID (e.g., zai-org/GLM-OCR)")
+    parser.add_argument("--input", dest="user_input", default="", help="User input (file path, URL, or text prompt)")
+    parser.add_argument("--hf-token", dest="hf_token", default="", help="Hugging Face API token")
     
     args = parser.parse_args()
 
     if args.command == "run":
-        run_model(args.model_id)
+        run_model(args.model_id, user_input=args.user_input, hf_token=args.hf_token)
     elif args.command == "generate":
-        generate_model_script(args.model_id)
+        generate_model_script(args.model_id, hf_token=args.hf_token)
     else:
         parser.print_help()
         sys.exit(1)
 
-def run_model(model_id: str):
+def run_model(model_id: str, user_input: str = "", hf_token: str = ""):
     print(f"MODEL: {model_id}")
     
     # Step 1: Fetch metadata
-    inspector = ModelInspector(model_id)
+    inspector = ModelInspector(model_id, hf_token=hf_token or None)
     metadata = inspector.fetch_metadata()
     
     # Step 2 & 3: Detect architecture and runtime
@@ -55,8 +57,15 @@ def run_model(model_id: str):
     script_path = script_gen.generate_script(str(env_manager.env_dir))
     print("SCRIPT: generated")
     
+    # Build extra env for the child process
+    extra_env = {}
+    if hf_token:
+        extra_env["HF_TOKEN"] = hf_token
+    if user_input:
+        extra_env["HB_INPUT"] = user_input
+    
     # Step 8: Execute
-    executor = Executor(python_exec, script_path)
+    executor = Executor(python_exec, script_path, extra_env=extra_env)
     success = executor.run()
     
     # Step 9: CLI output
@@ -66,9 +75,9 @@ def run_model(model_id: str):
         print("EXECUTION: failed")
         sys.exit(1)
 
-def generate_model_script(model_id: str):
+def generate_model_script(model_id: str, hf_token: str = ""):
     try:
-        inspector = ModelInspector(model_id)
+        inspector = ModelInspector(model_id, hf_token=hf_token or None)
         metadata = inspector.fetch_metadata()
         
         router = RuntimeRouter(metadata)

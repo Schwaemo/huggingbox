@@ -123,14 +123,16 @@ struct ModelDependencyProbeResult {
     compatibility_error: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
+#[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase", default)]
 struct AppSettingsPayload {
+    // Kept for back-compat with old settings.json files; no longer used in UI
+    #[serde(default)]
     claude_api_key: String,
     hf_token: String,
     model_storage_path: String,
+    env_storage_path: String,
     preferred_device: String,
-    #[serde(default)]
     selected_gpu_id: Option<String>,
     theme: String,
 }
@@ -338,6 +340,27 @@ async fn resolve_python(app: &AppHandle, model_id: Option<&str>) -> Result<Strin
         }
     }
     find_python(app).await
+}
+
+/// Returns the root directory under which per-model venvs are stored.
+/// Uses the user-configured path when non-empty; otherwise defaults to
+/// `<app_data>/venvs`.
+fn effective_venv_root(app: &AppHandle, custom_path: Option<&str>) -> Result<PathBuf, String> {
+    if let Some(p) = custom_path {
+        let trimmed = p.trim();
+        if !trimmed.is_empty() {
+            let path = PathBuf::from(expand_home_dir(trimmed));
+            std::fs::create_dir_all(&path)
+                .map_err(|e| format!("Failed to create env storage dir: {}", e))?;
+            return Ok(path);
+        }
+    }
+    // Default: AppData/venvs
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to resolve app data dir: {}", e))?;
+    Ok(data_dir.join("venvs"))
 }
 
 fn model_dir_from_id(storage_path: &str, model_id: &str) -> PathBuf {
@@ -824,14 +847,27 @@ async fn detect_python(app: AppHandle) -> PythonInfo {
 }
 
 #[tauri::command]
-async fn generate_python_code_local(app: AppHandle, model_id: String) -> Result<String, String> {
+async fn generate_python_code_local(app: AppHandle, model_id: String, hf_token: Option<String>) -> Result<String, String> {
     let python = find_python(&app).await?;
     let mut cmd = tokio::process::Command::new(&python);
     if let Some(pypath) = hf_auto_runner_parent_dir(&app) {
         cmd.env("PYTHONPATH", pypath.to_string_lossy().to_string());
     }
+    // Set token as env var so inspector.py can pick it up
+    if let Some(ref token) = hf_token {
+        if !token.is_empty() {
+            cmd.env("HF_TOKEN", token);
+        }
+    }
+    let mut args = vec!["-m".to_string(), "hf_auto_runner".to_string(), "generate".to_string(), model_id.clone()];
+    if let Some(ref token) = hf_token {
+        if !token.is_empty() {
+            args.push("--hf-token".to_string());
+            args.push(token.clone());
+        }
+    }
     let output = cmd
-        .args(["-m", "hf_auto_runner", "generate", &model_id])
+        .args(&args)
         .output()
         .await
         .map_err(|e| format!("Failed to call python hf_auto_runner script logic: {}", e))?;
@@ -857,6 +893,9 @@ async fn run_python_code(
     preferred_device: Option<String>,
     selected_gpu_id: Option<String>,
     model_id: Option<String>,
+    hf_token: Option<String>,
+    user_input: Option<String>,
+    env_storage_path: Option<String>,
 ) -> Result<(), String> {
     {
         let lock = handle.execution_pid.lock().unwrap();
@@ -877,6 +916,36 @@ async fn run_python_code(
         command.env("PYTHONPATH", pypath.to_string_lossy().to_string());
     }
 
+    // Set HB_VENV_DIR so the Python env_manager uses the same venv directory
+    // that Tauri's resolve_python() created.
+    if let Some(ref mid) = model_id {
+        if !mid.trim().is_empty() {
+            if let Ok(venv_root) = effective_venv_root(&app, env_storage_path.as_deref()) {
+                let mut venv_dir = venv_root;
+                for segment in mid.split('/') {
+                    if !segment.trim().is_empty() {
+                        venv_dir.push(segment.trim());
+                    }
+                }
+                command.env("HB_VENV_DIR", venv_dir.to_string_lossy().to_string());
+            }
+        }
+    }
+
+    // Pass HF token as env var (belt-and-suspenders alongside CLI flag)
+    if let Some(ref token) = hf_token {
+        if !token.is_empty() {
+            command.env("HF_TOKEN", token);
+        }
+    }
+
+    // Pass user input as env var for the inference script
+    if let Some(ref input) = user_input {
+        if !input.is_empty() {
+            command.env("HB_INPUT", input);
+        }
+    }
+
     let device = preferred_device.unwrap_or_else(|| "auto".to_string()).to_lowercase();
     if device == "cpu" {
         command.env("CUDA_VISIBLE_DEVICES", "-1");
@@ -892,8 +961,25 @@ async fn run_python_code(
         return Err("Model ID is required for execution via hf_auto_runner.".to_string());
     }
 
+    // Build CLI args: -m hf_auto_runner run <model> [--hf-token T] [--input I]
+    let mut run_args = vec![
+        "-m".to_string(), "hf_auto_runner".to_string(), "run".to_string(), model.clone()
+    ];
+    if let Some(ref token) = hf_token {
+        if !token.is_empty() {
+            run_args.push("--hf-token".to_string());
+            run_args.push(token.clone());
+        }
+    }
+    if let Some(ref input) = user_input {
+        if !input.is_empty() {
+            run_args.push("--input".to_string());
+            run_args.push(input.clone());
+        }
+    }
+
     let mut child = command
-        .args(["-m", "hf_auto_runner", "run", &model])
+        .args(&run_args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

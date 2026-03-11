@@ -4,9 +4,10 @@ import os
 from typing import Dict, Any, List
 
 class ModelInspector:
-    def __init__(self, model_id: str):
+    def __init__(self, model_id: str, hf_token: str | None = None):
         self.model_id = model_id
-        self.api = HfApi()
+        self.hf_token = hf_token or os.environ.get("HF_TOKEN") or None
+        self.api = HfApi(token=self.hf_token)
 
     def fetch_metadata(self) -> Dict[str, Any]:
         """Fetches config.json and lists repository files."""
@@ -19,7 +20,11 @@ class ModelInspector:
         config = {}
         if "config.json" in filenames:
             try:
-                config_path = hf_hub_download(repo_id=self.model_id, filename="config.json")
+                config_path = hf_hub_download(
+                    repo_id=self.model_id,
+                    filename="config.json",
+                    token=self.hf_token,
+                )
                 with open(config_path, 'r', encoding='utf-8') as f:
                     config = json.load(f)
             except Exception as e:

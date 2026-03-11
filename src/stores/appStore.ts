@@ -60,6 +60,7 @@ export interface SystemInfo {
 export interface AppSettings {
   hfToken: string;
   modelStoragePath: string;
+  envStoragePath: string;
   preferredDevice: 'auto' | 'cpu' | 'cuda';
   selectedGpuId: string | null;
   theme: 'dark' | 'light';
@@ -220,6 +221,7 @@ export const useAppStore = create<AppStore>((set) => ({
   settings: {
     hfToken: '',
     modelStoragePath: '~/HuggingBox/models/',
+    envStoragePath: '',
     preferredDevice: 'auto',
     selectedGpuId: null,
     theme: 'dark',

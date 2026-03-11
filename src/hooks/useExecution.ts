@@ -117,6 +117,8 @@ export function useExecution() {
       pipelineTag?: string | null;
       preferredDevice?: 'auto' | 'cpu' | 'cuda';
       selectedGpuId?: string | null;
+      userInput?: string;
+      envStoragePath?: string;
     }
   ) => {
     const store = useAppStore.getState();
@@ -242,6 +244,9 @@ export function useExecution() {
         preferredDevice: options?.preferredDevice ?? 'auto',
         selectedGpuId: options?.selectedGpuId ?? null,
         modelId: options?.modelId ?? null,
+        hfToken: options?.hfToken ?? null,
+        userInput: options?.userInput ?? null,
+        envStoragePath: options?.envStoragePath || null,
       });
       // Execution result arrives via 'execution-done' event — nothing to do here
     } catch (err) {
