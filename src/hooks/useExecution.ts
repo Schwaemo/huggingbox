@@ -3,6 +3,12 @@ import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../stores/appStore';
 import { listDownloadedModels } from '../services/modelStorage';
+import { listModelEnvironments } from '../services/modelEnvironments';
+import {
+  clearPreferredEnvModelId,
+  getPreferredEnvModelId,
+  setPreferredEnvModelId,
+} from '../services/modelEnvPreference';
 
 interface ModelDependencyProbeResult {
   missingPackages: string[];
@@ -69,6 +75,73 @@ function markModelRunOnce(modelId: string): void {
   } catch {
     // ignore storage failures
   }
+}
+
+async function chooseExecutionEnvModelId(
+  modelId: string,
+  envStoragePath?: string
+): Promise<string | null> {
+  const envs = await listModelEnvironments(envStoragePath);
+  const envIds = envs.map((e) => e.modelId);
+  const hasOwnEnv = envIds.includes(modelId);
+
+  if (hasOwnEnv) {
+    setPreferredEnvModelId(modelId, modelId);
+    appendLog(`Using model environment: ${modelId}`);
+    return modelId;
+  }
+
+  const preferred = getPreferredEnvModelId(modelId);
+  if (preferred && envIds.includes(preferred)) {
+    appendLog(`Using saved shared environment: ${preferred}`);
+    return preferred;
+  }
+  if (preferred && !envIds.includes(preferred)) {
+    clearPreferredEnvModelId(modelId);
+    appendLog(`Saved shared environment not found anymore: ${preferred}`);
+  }
+
+  const createNew = window.confirm(
+    `No Python environment exists for this model yet:\n${modelId}\n\nCreate a new isolated environment? (Recommended)\n\nClick Cancel to use an existing environment.`
+  );
+  if (createNew) {
+    setPreferredEnvModelId(modelId, modelId);
+    appendLog('Environment choice: create new isolated environment.');
+    return modelId;
+  }
+
+  const candidates = envIds.filter((id) => id !== modelId);
+  if (candidates.length === 0) {
+    window.alert('No existing environments were found. Creating a new isolated environment instead.');
+    setPreferredEnvModelId(modelId, modelId);
+    appendLog('No reusable environments found; falling back to new isolated environment.');
+    return modelId;
+  }
+
+  const preview = candidates.slice(0, 12).join('\n');
+  const picked = window.prompt(
+    `Choose an existing environment by model id:\n\n${preview}\n\nEnter exact model id:`,
+    candidates[0]
+  );
+  if (picked === null) {
+    appendLog('Environment selection cancelled by user.');
+    return null;
+  }
+
+  const chosen = picked.trim();
+  if (!chosen) {
+    appendLog('Environment selection cancelled (empty input).');
+    return null;
+  }
+  if (!candidates.includes(chosen)) {
+    window.alert(`Environment "${chosen}" was not found in the existing environment list.`);
+    appendLog(`Invalid shared environment selected: ${chosen}`);
+    return null;
+  }
+
+  setPreferredEnvModelId(modelId, chosen);
+  appendLog(`Environment choice: reuse existing environment ${chosen}`);
+  return chosen;
 }
 
 async function ensureExecutionListenersRegistered(): Promise<void> {
@@ -219,8 +292,26 @@ export function useExecution() {
     startTimer();
 
     const modelId = options?.modelId?.trim() || '';
+    let executionEnvModelId: string | null = modelId || null;
     if (modelId) {
       store.setActiveExecutionModelId(modelId);
+
+      try {
+        executionEnvModelId = await chooseExecutionEnvModelId(modelId, options?.envStoragePath);
+      } catch (error) {
+        appendLog(`Environment discovery failed; defaulting to a new isolated environment. ${String(error)}`);
+        executionEnvModelId = modelId;
+      }
+
+      if (!executionEnvModelId) {
+        stopTimer();
+        store.setExecutionState('idle');
+        store.setExecutionError('Execution cancelled during Python environment selection.');
+        store.setDownloadStats(null);
+        return;
+      }
+
+      store.setActiveExecutionEnvModelId(executionEnvModelId);
     }
 
     const hasRunBefore = modelId ? hasModelRunOnce(modelId) : false;
@@ -242,6 +333,7 @@ export function useExecution() {
         const missingDownloadDeps = await invoke<string[]>('check_packages', {
           packages: ['huggingface_hub', 'hf_transfer'],
           modelId: options.modelId,
+          venvModelId: executionEnvModelId,
         });
 
         if (missingDownloadDeps.length > 0 && !allowAutoInstall) {
@@ -267,7 +359,11 @@ export function useExecution() {
           }
           store.setExecutionState('installing');
           appendLog(`Installing download dependencies: ${missingDownloadDeps.join(', ')}`);
-          await invoke('install_packages', { packages: missingDownloadDeps, modelId: options.modelId });
+          await invoke('install_packages', {
+            packages: missingDownloadDeps,
+            modelId: options.modelId,
+            venvModelId: executionEnvModelId,
+          });
           appendLog('Download dependency installation complete.');
         }
 
@@ -328,6 +424,7 @@ export function useExecution() {
         const probe = await invoke<ModelDependencyProbeResult>('probe_model_dependencies', {
           modelId: options.modelId,
           hfToken: options?.hfToken ?? null,
+          venvModelId: executionEnvModelId,
         });
 
         const missingFromProbe = uniqueDependencies(probe.missingPackages ?? []);
@@ -375,6 +472,7 @@ export function useExecution() {
             await invoke('install_packages', {
               packages: requirementsToInstall,
               modelId: options?.modelId ?? null,
+              venvModelId: executionEnvModelId,
             });
             appendLog('Requirement alignment complete.');
           } catch (err) {
@@ -394,6 +492,7 @@ export function useExecution() {
         const missing = uniqueDependencies(await invoke<string[]>('check_packages', {
           packages,
           modelId: options?.modelId ?? null,
+          venvModelId: executionEnvModelId,
         }));
         if (missing.length > 0) {
           if (!allowAutoInstall) {
@@ -415,6 +514,7 @@ export function useExecution() {
             await invoke('install_packages', {
               packages: missing,
               modelId: options?.modelId ?? null,
+              venvModelId: executionEnvModelId,
             });
             appendLog('Package installation complete.');
           }
@@ -434,7 +534,9 @@ export function useExecution() {
     appendLog(
       `Launching runtime with device=${options?.preferredDevice ?? 'auto'}${
         options?.selectedGpuId ? `, gpu=${options.selectedGpuId}` : ''
-      }${options?.envStoragePath ? `, envStorage=${options.envStoragePath}` : ''}`
+      }${options?.envStoragePath ? `, envStorage=${options.envStoragePath}` : ''}${
+        executionEnvModelId ? `, envModel=${executionEnvModelId}` : ''
+      }`
     );
 
     try {
@@ -442,6 +544,7 @@ export function useExecution() {
         preferredDevice: options?.preferredDevice ?? 'auto',
         selectedGpuId: options?.selectedGpuId ?? null,
         modelId: options?.modelId ?? null,
+        venvModelId: executionEnvModelId,
         hfToken: options?.hfToken ?? null,
         userInput: options?.userInput ?? null,
         envStoragePath: options?.envStoragePath || null,

@@ -24,6 +24,8 @@ export default function OutputPanel({ modelId, pipelineTag, inputValue = '' }: O
   const executionError = useAppStore((s) => s.executionError);
   const downloadStats = useAppStore((s) => s.downloadStats);
   const settings = useAppStore((s) => s.settings);
+  const activeExecutionModelId = useAppStore((s) => s.activeExecutionModelId);
+  const activeExecutionEnvModelId = useAppStore((s) => s.activeExecutionEnvModelId);
   const appendExecutionOutput = useAppStore((s) => s.appendExecutionOutput);
   const appendStderrOutput = useAppStore((s) => s.appendStderrOutput);
 
@@ -37,6 +39,10 @@ export default function OutputPanel({ modelId, pipelineTag, inputValue = '' }: O
 
   const isRunning = executionState === 'running' || executionState === 'installing';
   const hasOutput = executionOutput.length > 0;
+  const envModelIdForTerminal =
+    activeExecutionModelId === modelId && activeExecutionEnvModelId
+      ? activeExecutionEnvModelId
+      : modelId;
   const parsed = parseExecutionOutput(executionOutput, pipelineTag);
   const imageSource = useMemo(() => {
     if (inputValue.startsWith('__HBIMG__:')) return inputValue.slice('__HBIMG__:'.length);
@@ -235,7 +241,9 @@ export default function OutputPanel({ modelId, pipelineTag, inputValue = '' }: O
     try {
       const result = await invoke<ShellCommandResult>('run_model_shell_command', {
         modelId,
+        venvModelId: envModelIdForTerminal,
         command,
+        modelStoragePath: settings.modelStoragePath || null,
         envStoragePath: settings.envStoragePath || null,
         cwd: terminalCwd,
         hfToken: settings.hfToken || null,
@@ -498,7 +506,7 @@ export default function OutputPanel({ modelId, pipelineTag, inputValue = '' }: O
               void handleTerminalRun();
             }
           }}
-          placeholder={`Run command in ${modelId} environment`}
+          placeholder={`Run command in ${envModelIdForTerminal} environment`}
           style={{
             flex: 1,
             height: '28px',

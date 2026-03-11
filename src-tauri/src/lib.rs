@@ -126,6 +126,15 @@ struct GpuInfoPayload {
     backend: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelWorkspaceEntryPayload {
+    name: String,
+    relative_path: String,
+    is_dir: bool,
+    size_bytes: Option<u64>,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ModelDependencyProbeResult {
@@ -285,14 +294,6 @@ fn model_venv_dir_from_root(root: &PathBuf, model_id: &str) -> Result<PathBuf, S
     Ok(dir)
 }
 
-fn model_venvs_root(app: &AppHandle) -> Result<PathBuf, String> {
-    let data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("Failed to resolve app data dir: {}", e))?;
-    Ok(data_dir.join("venvs"))
-}
-
 fn venv_python_path(venv_dir: &PathBuf) -> PathBuf {
     #[cfg(target_os = "windows")]
     {
@@ -399,6 +400,59 @@ fn model_dir_from_id(storage_path: &str, model_id: &str) -> PathBuf {
         path.push(segment);
     }
     path
+}
+
+fn normalize_relative_workspace_path(input: &str) -> Result<String, String> {
+    let trimmed = input.trim().replace('\\', "/");
+    if trimmed.is_empty() {
+        return Ok(String::new());
+    }
+    if trimmed.starts_with('/') {
+        return Err("Absolute paths are not allowed.".to_string());
+    }
+    let mut normalized_segments = Vec::new();
+    for raw in trimmed.split('/') {
+        let seg = raw.trim();
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        if seg == ".." {
+            return Err("Path traversal is not allowed.".to_string());
+        }
+        normalized_segments.push(seg.to_string());
+    }
+    Ok(normalized_segments.join("/"))
+}
+
+fn resolve_model_workspace_root(model_id: &str, storage_path: &str) -> Result<PathBuf, String> {
+    validate_model_id(model_id)?;
+    let root = model_dir_from_id(storage_path, model_id);
+    std::fs::create_dir_all(&root)
+        .map_err(|e| format!("Failed to create model workspace root: {}", e))?;
+    Ok(root)
+}
+
+fn resolve_model_workspace_path(root: &PathBuf, relative: &str) -> Result<PathBuf, String> {
+    let normalized = normalize_relative_workspace_path(relative)?;
+    let mut out = root.clone();
+    if !normalized.is_empty() {
+        for seg in normalized.split('/') {
+            out.push(seg);
+        }
+    }
+    Ok(out)
+}
+
+fn workspace_relative_path(root: &PathBuf, path: &PathBuf) -> String {
+    path.strip_prefix(root)
+        .ok()
+        .map(|rel| {
+            rel.iter()
+                .map(|s| s.to_string_lossy().to_string())
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+        .unwrap_or_default()
 }
 
 fn compute_dir_size(path: &PathBuf) -> u64 {
@@ -949,6 +1003,7 @@ async fn run_python_code(
     preferred_device: Option<String>,
     selected_gpu_id: Option<String>,
     model_id: Option<String>,
+    venv_model_id: Option<String>,
     hf_token: Option<String>,
     user_input: Option<String>,
     env_storage_path: Option<String>,
@@ -960,7 +1015,16 @@ async fn run_python_code(
         }
     }
 
-    let python = resolve_python(&app, model_id.as_deref()).await?;
+    let execution_env_model = venv_model_id
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_string())
+        .or_else(|| model_id.as_deref().map(|s| s.trim().to_string()));
+    if let Some(ref env_model) = execution_env_model {
+        validate_model_id(env_model)?;
+    }
+
+    let python = resolve_python(&app, execution_env_model.as_deref()).await?;
 
     let mut command = tokio::process::Command::new(&python);
     command
@@ -975,7 +1039,7 @@ async fn run_python_code(
 
     // Set HB_VENV_DIR so the Python env_manager uses the same venv directory
     // that Tauri's resolve_python() created.
-    if let Some(ref mid) = model_id {
+    if let Some(ref mid) = execution_env_model {
         if !mid.trim().is_empty() {
             if let Ok(venv_root) = effective_venv_root(&app, env_storage_path.as_deref()) {
                 let mut venv_dir = venv_root;
@@ -1051,8 +1115,12 @@ async fn run_python_code(
 
     let _ = app.emit("execution-stdout", StreamPayload {
         text: format!(
-            "[HuggingBox] Launching model execution\n  model: {}\n  python: {}\n  device: {}\n  input: {}\n",
-            model, python, device, input_kind
+            "[HuggingBox] Launching model execution\n  model: {}\n  env: {}\n  python: {}\n  device: {}\n  input: {}\n",
+            model,
+            execution_env_model.as_deref().unwrap_or("<default>"),
+            python,
+            device,
+            input_kind
         ),
     });
     if let Some(path) = env_storage_path.as_deref() {
@@ -1375,8 +1443,123 @@ fn list_downloaded_models(storage_path: String) -> Result<Vec<DownloadedModelPay
 }
 
 #[tauri::command]
-fn list_model_environments(app: AppHandle) -> Result<Vec<ModelEnvironmentPayload>, String> {
-    let root = model_venvs_root(&app)?;
+fn list_model_workspace_entries(
+    model_id: String,
+    storage_path: String,
+    directory: Option<String>,
+) -> Result<Vec<ModelWorkspaceEntryPayload>, String> {
+    let root = resolve_model_workspace_root(&model_id, &storage_path)?;
+    let dir_rel = directory.unwrap_or_default();
+    let dir_path = resolve_model_workspace_path(&root, &dir_rel)?;
+    if !dir_path.exists() {
+        std::fs::create_dir_all(&dir_path)
+            .map_err(|e| format!("Failed to create workspace directory: {}", e))?;
+    }
+    if !dir_path.is_dir() {
+        return Err("Selected workspace path is not a directory.".to_string());
+    }
+
+    let mut out = Vec::new();
+    let entries = std::fs::read_dir(&dir_path)
+        .map_err(|e| format!("Failed to read workspace directory: {}", e))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+        let name = entry.file_name().to_string_lossy().to_string();
+        let relative_path = workspace_relative_path(&root, &path);
+        out.push(ModelWorkspaceEntryPayload {
+            name,
+            relative_path,
+            is_dir: meta.is_dir(),
+            size_bytes: if meta.is_file() { Some(meta.len()) } else { None },
+        });
+    }
+
+    out.sort_by(|a, b| {
+        if a.is_dir != b.is_dir {
+            return b.is_dir.cmp(&a.is_dir);
+        }
+        a.name.to_lowercase().cmp(&b.name.to_lowercase())
+    });
+    Ok(out)
+}
+
+#[tauri::command]
+fn read_model_workspace_file(
+    model_id: String,
+    storage_path: String,
+    relative_path: String,
+) -> Result<String, String> {
+    let root = resolve_model_workspace_root(&model_id, &storage_path)?;
+    let file_path = resolve_model_workspace_path(&root, &relative_path)?;
+    if !file_path.exists() {
+        return Err("Workspace file does not exist.".to_string());
+    }
+    if !file_path.is_file() {
+        return Err("Selected workspace path is not a file.".to_string());
+    }
+    std::fs::read_to_string(&file_path)
+        .map_err(|e| format!("Failed to read workspace file: {}", e))
+}
+
+#[tauri::command]
+fn write_model_workspace_file(
+    model_id: String,
+    storage_path: String,
+    relative_path: String,
+    content: String,
+) -> Result<(), String> {
+    let root = resolve_model_workspace_root(&model_id, &storage_path)?;
+    let file_path = resolve_model_workspace_path(&root, &relative_path)?;
+    let parent = file_path
+        .parent()
+        .ok_or("Could not resolve workspace file parent directory.")?;
+    std::fs::create_dir_all(parent)
+        .map_err(|e| format!("Failed to create workspace file directory: {}", e))?;
+    std::fs::write(&file_path, content)
+        .map_err(|e| format!("Failed to write workspace file: {}", e))
+}
+
+#[tauri::command]
+fn create_model_workspace_file(
+    model_id: String,
+    storage_path: String,
+    relative_path: String,
+) -> Result<(), String> {
+    let root = resolve_model_workspace_root(&model_id, &storage_path)?;
+    let file_path = resolve_model_workspace_path(&root, &relative_path)?;
+    if file_path.exists() {
+        return Err("Workspace file already exists.".to_string());
+    }
+    let parent = file_path
+        .parent()
+        .ok_or("Could not resolve workspace file parent directory.")?;
+    std::fs::create_dir_all(parent)
+        .map_err(|e| format!("Failed to create workspace file directory: {}", e))?;
+    std::fs::write(&file_path, "")
+        .map_err(|e| format!("Failed to create workspace file: {}", e))
+}
+
+#[tauri::command]
+fn create_model_workspace_directory(
+    model_id: String,
+    storage_path: String,
+    relative_path: String,
+) -> Result<(), String> {
+    let root = resolve_model_workspace_root(&model_id, &storage_path)?;
+    let dir_path = resolve_model_workspace_path(&root, &relative_path)?;
+    std::fs::create_dir_all(&dir_path)
+        .map_err(|e| format!("Failed to create workspace directory: {}", e))
+}
+
+#[tauri::command]
+fn list_model_environments(
+    app: AppHandle,
+    env_storage_path: Option<String>,
+) -> Result<Vec<ModelEnvironmentPayload>, String> {
+    let root = effective_venv_root(&app, env_storage_path.as_deref())?;
     if !root.exists() {
         return Ok(vec![]);
     }
@@ -1387,8 +1570,13 @@ fn list_model_environments(app: AppHandle) -> Result<Vec<ModelEnvironmentPayload
 }
 
 #[tauri::command]
-fn delete_model_environment(app: AppHandle, model_id: String) -> Result<(), String> {
-    let dir = model_venv_dir(&app, &model_id)?;
+fn delete_model_environment(
+    app: AppHandle,
+    model_id: String,
+    env_storage_path: Option<String>,
+) -> Result<(), String> {
+    let root = effective_venv_root(&app, env_storage_path.as_deref())?;
+    let dir = model_venv_dir_from_root(&root, &model_id)?;
     if !dir.exists() {
         return Ok(());
     }
@@ -1402,8 +1590,17 @@ async fn check_packages(
     app: AppHandle,
     packages: Vec<String>,
     model_id: Option<String>,
+    venv_model_id: Option<String>,
 ) -> Result<Vec<String>, String> {
-    let python = resolve_python(&app, model_id.as_deref()).await?;
+    let resolved_env = venv_model_id
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_string())
+        .or_else(|| model_id.as_deref().map(|s| s.trim().to_string()));
+    if let Some(ref env_model) = resolved_env {
+        validate_model_id(env_model)?;
+    }
+    let python = resolve_python(&app, resolved_env.as_deref()).await?;
     let mut missing = Vec::new();
 
     for pkg in &packages {
@@ -1427,8 +1624,15 @@ async fn probe_model_dependencies(
     app: AppHandle,
     model_id: String,
     hf_token: Option<String>,
+    venv_model_id: Option<String>,
 ) -> Result<ModelDependencyProbeResult, String> {
-    let python = resolve_python(&app, Some(&model_id)).await?;
+    let resolved_env = venv_model_id
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| model_id.clone());
+    validate_model_id(&resolved_env)?;
+    let python = resolve_python(&app, Some(&resolved_env)).await?;
     let script = r##"
 import json
 import re
@@ -1799,8 +2003,18 @@ async fn install_packages(
     app: AppHandle,
     packages: Vec<String>,
     model_id: Option<String>,
+    venv_model_id: Option<String>,
 ) -> Result<(), String> {
-    let python = resolve_python(&app, model_id.as_deref()).await?;
+    let execution_env_model = venv_model_id
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_string())
+        .or_else(|| model_id.as_deref().map(|s| s.trim().to_string()));
+    if let Some(ref env_model) = execution_env_model {
+        validate_model_id(env_model)?;
+    }
+
+    let python = resolve_python(&app, execution_env_model.as_deref()).await?;
     let mut torch_family = Vec::new();
     let mut other_packages = Vec::new();
     let mut flash_attn_packages = Vec::new();
@@ -1952,7 +2166,9 @@ async fn install_packages(
 async fn run_model_shell_command(
     app: AppHandle,
     model_id: String,
+    venv_model_id: Option<String>,
     command: String,
+    model_storage_path: Option<String>,
     env_storage_path: Option<String>,
     cwd: Option<String>,
     hf_token: Option<String>,
@@ -1963,9 +2179,22 @@ async fn run_model_shell_command(
         return Err("Command is empty.".to_string());
     }
 
+    let execution_env_model = venv_model_id
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| model_id.clone());
+    validate_model_id(&execution_env_model)?;
+
     let venv_root = effective_venv_root(&app, env_storage_path.as_deref())?;
-    let venv_dir = model_venv_dir_from_root(&venv_root, &model_id)?;
+    let venv_dir = model_venv_dir_from_root(&venv_root, &execution_env_model)?;
     let _ = ensure_venv_python_at_dir(&app, &venv_dir).await?;
+    let workspace_root = model_storage_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| resolve_model_workspace_root(&model_id, s))
+        .transpose()?;
 
     let venv_python = venv_python_path(&venv_dir);
     let venv_bin = venv_python
@@ -1979,7 +2208,7 @@ async fn run_model_shell_command(
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
         .filter(|p| p.exists() && p.is_dir())
-        .unwrap_or_else(|| venv_dir.clone());
+        .unwrap_or_else(|| workspace_root.unwrap_or_else(|| venv_dir.clone()));
 
     let current_path = std::env::var("PATH").unwrap_or_default();
     let sep = if cfg!(target_os = "windows") { ";" } else { ":" };
@@ -2114,6 +2343,11 @@ pub fn run() {
             download_model,
             cancel_download,
             list_downloaded_models,
+            list_model_workspace_entries,
+            read_model_workspace_file,
+            write_model_workspace_file,
+            create_model_workspace_file,
+            create_model_workspace_directory,
             list_model_environments,
             delete_model_environment,
             check_packages,

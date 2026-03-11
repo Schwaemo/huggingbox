@@ -4,10 +4,19 @@ import { useAppStore } from '../../stores/appStore';
 
 interface CodeEditorProps {
   code: string;
+  fileName?: string;
+  statusText?: string;
+  onCodeChange?: (value: string) => void;
   readOnly?: boolean;
 }
 
-export default function CodeEditor({ code, readOnly = false }: CodeEditorProps) {
+export default function CodeEditor({
+  code,
+  fileName = 'generated_code.py',
+  statusText = 'Python',
+  onCodeChange,
+  readOnly = false,
+}: CodeEditorProps) {
   const theme = useAppStore((s) => s.settings.theme);
   const setGeneratedCode = useAppStore((s) => s.setGeneratedCode);
   const setCodeSource = useAppStore((s) => s.setCodeSource);
@@ -21,6 +30,10 @@ export default function CodeEditor({ code, readOnly = false }: CodeEditorProps) 
 
   function handleChange(value: string | undefined) {
     if (value === undefined) return;
+    if (onCodeChange) {
+      onCodeChange(value);
+      return;
+    }
     setGeneratedCode(value);
     setCodeSource('edited');
   }
@@ -56,7 +69,7 @@ export default function CodeEditor({ code, readOnly = false }: CodeEditorProps) 
             color: 'var(--text-muted)',
           }}
         >
-          generated_code.py
+          {fileName}
         </span>
         <span
           style={{
@@ -65,7 +78,7 @@ export default function CodeEditor({ code, readOnly = false }: CodeEditorProps) 
             color: 'var(--text-muted)',
           }}
         >
-          Python
+          {statusText}
         </span>
       </div>
 

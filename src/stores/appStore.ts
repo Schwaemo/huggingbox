@@ -85,6 +85,7 @@ interface AppStore {
   currentView: 'browse' | 'model-detail' | 'my-models' | 'settings';
   selectedModelId: string | null;
   activeExecutionModelId: string | null;
+  activeExecutionEnvModelId: string | null;
 
   // Browse
   searchQuery: string;
@@ -134,6 +135,7 @@ interface AppStore {
   navigateToModel: (id: string, options?: { preserveWorkspace?: boolean }) => void;
   navigateToBrowse: () => void;
   setActiveExecutionModelId: (id: string | null) => void;
+  setActiveExecutionEnvModelId: (id: string | null) => void;
 
   setSearchQuery: (q: string) => void;
   setPipelineFilter: (f: string | null) => void;
@@ -177,6 +179,7 @@ export const useAppStore = create<AppStore>((set) => ({
   currentView: 'browse',
   selectedModelId: null,
   activeExecutionModelId: null,
+  activeExecutionEnvModelId: null,
 
   // Browse
   searchQuery: '',
@@ -263,11 +266,16 @@ export const useAppStore = create<AppStore>((set) => ({
           s.activeExecutionModelId && s.activeExecutionModelId === id
             ? s.activeExecutionModelId
             : null,
+        activeExecutionEnvModelId:
+          s.activeExecutionModelId && s.activeExecutionModelId === id
+            ? s.activeExecutionEnvModelId
+            : null,
       };
     }),
   navigateToBrowse: () =>
     set({ currentView: 'browse', selectedModelId: null }),
   setActiveExecutionModelId: (id) => set({ activeExecutionModelId: id }),
+  setActiveExecutionEnvModelId: (id) => set({ activeExecutionEnvModelId: id }),
 
   setSearchQuery: (q) => set({ searchQuery: q }),
   setPipelineFilter: (f) => set({ pipelineFilter: f }),

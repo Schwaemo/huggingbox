@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, AlertCircle, RefreshCw } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
 import type { HFModelDetail } from '../../stores/appStore';
@@ -17,11 +17,20 @@ import {
 } from '../../services/codeCache';
 import ModelInfoPanel from './ModelInfoPanel';
 import CodeEditor from './CodeEditor';
+import FileExplorer from './FileExplorer';
 import InputPanel from './InputPanel';
 import OutputPanel from './OutputPanel';
 import Button from '../shared/Button';
 import SkeletonCard from '../shared/SkeletonCard';
 import { useExecution } from '../../hooks/useExecution';
+import {
+  createModelWorkspaceDirectory,
+  createModelWorkspaceFile,
+  listModelWorkspaceEntries,
+  readModelWorkspaceFile,
+  type ModelWorkspaceEntry,
+  writeModelWorkspaceFile,
+} from '../../services/modelWorkspace';
 
 export default function ModelDetailView() {
   const {
@@ -285,7 +294,18 @@ function WorkspaceLayout({
   codeGenerationError,
 }: WorkspaceLayoutProps) {
   const [inputValue, setInputValue] = useState('');
+  const [currentDirectory, setCurrentDirectory] = useState('');
+  const [workspaceEntries, setWorkspaceEntries] = useState<ModelWorkspaceEntry[]>([]);
+  const [workspaceLoading, setWorkspaceLoading] = useState(false);
+  const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+  const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
+  const [editorCode, setEditorCode] = useState(code);
+  const [editorStatus, setEditorStatus] = useState('Python');
+  const initialCodeRef = useRef(code);
+  const skipNextAutosaveRef = useRef(true);
+  const { settings, setGeneratedCode, setCodeSource } = useAppStore();
   const { runCode, cancelExecution } = useExecution();
+  const modelId = useMemo(() => model.modelId ?? model.id, [model.id, model.modelId]);
 
   const isRunning =
     executionState === 'running' ||
@@ -306,17 +326,219 @@ function WorkspaceLayout({
   else if (siblings.some((f) => f.rfilename.endsWith('.safetensors'))) formatLabel = 'SafeTensors';
   else if (siblings.some((f) => f.rfilename.endsWith('.bin'))) formatLabel = 'PyTorch';
 
+  useEffect(() => {
+    initialCodeRef.current = code;
+  }, [code, modelId]);
+
+  function normalizeRelativePath(input: string): string {
+    return input
+      .trim()
+      .replace(/\\/g, '/')
+      .replace(/^\/+/, '')
+      .split('/')
+      .map((segment) => segment.trim())
+      .filter((segment) => segment.length > 0 && segment !== '.')
+      .join('/');
+  }
+
+  function parentDirectory(path: string): string {
+    const parts = path.split('/').filter(Boolean);
+    if (parts.length <= 1) return '';
+    parts.pop();
+    return parts.join('/');
+  }
+
+  function fileName(path: string | null): string {
+    if (!path) return 'huggingbox_main.py';
+    const parts = path.split('/').filter(Boolean);
+    return parts[parts.length - 1] || path;
+  }
+
+  const refreshWorkspaceEntries = useCallback(
+    async (directory: string) => {
+      const rows = await listModelWorkspaceEntries(modelId, settings.modelStoragePath, directory);
+      setWorkspaceEntries(rows);
+    },
+    [modelId, settings.modelStoragePath]
+  );
+
+  const openWorkspaceFile = useCallback(
+    async (relativePath: string) => {
+      const content = await readModelWorkspaceFile(modelId, settings.modelStoragePath, relativePath);
+      setSelectedFilePath(relativePath);
+      setEditorCode(content);
+      setGeneratedCode(content);
+      setCodeSource('edited');
+      skipNextAutosaveRef.current = true;
+      setEditorStatus('Python');
+      setWorkspaceError(null);
+    },
+    [modelId, setCodeSource, setGeneratedCode, settings.modelStoragePath]
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    setCurrentDirectory('');
+    setWorkspaceEntries([]);
+    setWorkspaceError(null);
+    setWorkspaceLoading(true);
+    setEditorStatus('Python');
+
+    void (async () => {
+      const defaultFile = 'huggingbox_main.py';
+      try {
+        let content: string;
+        try {
+          content = await readModelWorkspaceFile(modelId, settings.modelStoragePath, defaultFile);
+        } catch {
+          content = initialCodeRef.current || '';
+          await writeModelWorkspaceFile(modelId, settings.modelStoragePath, defaultFile, content);
+        }
+
+        if (cancelled) return;
+        setSelectedFilePath(defaultFile);
+        setEditorCode(content);
+        setGeneratedCode(content);
+        setCodeSource('edited');
+        skipNextAutosaveRef.current = true;
+
+        await refreshWorkspaceEntries('');
+      } catch (error) {
+        if (!cancelled) {
+          setWorkspaceError(`Workspace init failed: ${String(error)}`);
+        }
+      } finally {
+        if (!cancelled) {
+          setWorkspaceLoading(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [modelId, refreshWorkspaceEntries, setCodeSource, setGeneratedCode, settings.modelStoragePath]);
+
+  useEffect(() => {
+    if (!selectedFilePath) return undefined;
+    if (skipNextAutosaveRef.current) {
+      skipNextAutosaveRef.current = false;
+      return undefined;
+    }
+
+    setEditorStatus('Saving...');
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          await writeModelWorkspaceFile(
+            modelId,
+            settings.modelStoragePath,
+            selectedFilePath,
+            editorCode
+          );
+          setEditorStatus('Saved');
+          setTimeout(() => setEditorStatus('Python'), 1000);
+        } catch (error) {
+          setEditorStatus('Save failed');
+          setWorkspaceError(`Failed saving ${selectedFilePath}: ${String(error)}`);
+        }
+      })();
+    }, 450);
+
+    return () => clearTimeout(timer);
+  }, [editorCode, modelId, selectedFilePath, settings.modelStoragePath]);
+
+  const handleCodeChange = useCallback(
+    (nextCode: string) => {
+      setEditorCode(nextCode);
+      setGeneratedCode(nextCode);
+      setCodeSource('edited');
+    },
+    [setCodeSource, setGeneratedCode]
+  );
+
+  const handleOpenDirectory = useCallback(
+    async (relativePath: string) => {
+      setCurrentDirectory(relativePath);
+      setWorkspaceLoading(true);
+      try {
+        await refreshWorkspaceEntries(relativePath);
+      } catch (error) {
+        setWorkspaceError(`Could not open folder: ${String(error)}`);
+      } finally {
+        setWorkspaceLoading(false);
+      }
+    },
+    [refreshWorkspaceEntries]
+  );
+
+  const handleNavigateUp = useCallback(async () => {
+    const next = parentDirectory(currentDirectory);
+    setCurrentDirectory(next);
+    setWorkspaceLoading(true);
+    try {
+      await refreshWorkspaceEntries(next);
+    } catch (error) {
+      setWorkspaceError(`Could not load folder: ${String(error)}`);
+    } finally {
+      setWorkspaceLoading(false);
+    }
+  }, [currentDirectory, refreshWorkspaceEntries]);
+
+  const handleRefresh = useCallback(async () => {
+    setWorkspaceLoading(true);
+    try {
+      await refreshWorkspaceEntries(currentDirectory);
+    } catch (error) {
+      setWorkspaceError(`Refresh failed: ${String(error)}`);
+    } finally {
+      setWorkspaceLoading(false);
+    }
+  }, [currentDirectory, refreshWorkspaceEntries]);
+
+  const handleCreateFile = useCallback(async () => {
+    const defaultPath = currentDirectory ? `${currentDirectory}/new_file.py` : 'new_file.py';
+    const typed = window.prompt('New file path (relative to model folder):', defaultPath);
+    if (typed === null) return;
+    const relativePath = normalizeRelativePath(typed);
+    if (!relativePath) return;
+    try {
+      await createModelWorkspaceFile(modelId, settings.modelStoragePath, relativePath);
+      const dir = parentDirectory(relativePath);
+      setCurrentDirectory(dir);
+      await refreshWorkspaceEntries(dir);
+      await openWorkspaceFile(relativePath);
+    } catch (error) {
+      setWorkspaceError(`Could not create file: ${String(error)}`);
+    }
+  }, [currentDirectory, modelId, openWorkspaceFile, refreshWorkspaceEntries, settings.modelStoragePath]);
+
+  const handleCreateFolder = useCallback(async () => {
+    const defaultPath = currentDirectory ? `${currentDirectory}/new_folder` : 'new_folder';
+    const typed = window.prompt('New folder path (relative to model folder):', defaultPath);
+    if (typed === null) return;
+    const relativePath = normalizeRelativePath(typed);
+    if (!relativePath) return;
+    try {
+      await createModelWorkspaceDirectory(modelId, settings.modelStoragePath, relativePath);
+      const dir = parentDirectory(relativePath);
+      setCurrentDirectory(dir);
+      await refreshWorkspaceEntries(dir);
+    } catch (error) {
+      setWorkspaceError(`Could not create folder: ${String(error)}`);
+    }
+  }, [currentDirectory, modelId, refreshWorkspaceEntries, settings.modelStoragePath]);
+
   function handleRun() {
-    const store = useAppStore.getState();
     runCode({
-      modelId: model.modelId ?? model.id,
-      storagePath: store.settings.modelStoragePath,
-      hfToken: store.settings.hfToken,
+      modelId,
+      storagePath: settings.modelStoragePath,
+      hfToken: settings.hfToken,
       pipelineTag: model.pipeline_tag,
-      preferredDevice: store.settings.preferredDevice,
-      selectedGpuId: store.settings.selectedGpuId,
+      preferredDevice: settings.preferredDevice,
+      selectedGpuId: settings.selectedGpuId,
       userInput: inputValue.trim() || undefined,
-      envStoragePath: store.settings.envStoragePath || undefined,
+      envStoragePath: settings.envStoragePath || undefined,
     });
   }
 
@@ -411,12 +633,58 @@ function WorkspaceLayout({
             </div>
           </div>
         )}
+        {workspaceError && (
+          <div
+            style={{
+              flex: '0 0 auto',
+              borderBottom: '1px solid var(--border)',
+              padding: 'var(--space-xs) var(--space-md)',
+              backgroundColor: 'rgba(245,158,11,0.10)',
+              fontFamily: '"JetBrains Mono", monospace',
+              fontSize: '11px',
+              color: 'var(--warning)',
+              whiteSpace: 'pre-wrap',
+            }}
+          >
+            {workspaceError}
+          </div>
+        )}
         <div style={{ flex: '0 0 55%', overflow: 'hidden', borderBottom: '1px solid var(--border)' }}>
-          <CodeEditor code={code} />
+          <div style={{ display: 'flex', height: '100%' }}>
+            <FileExplorer
+              currentDirectory={currentDirectory}
+              entries={workspaceEntries}
+              loading={workspaceLoading}
+              selectedFilePath={selectedFilePath}
+              error={workspaceError}
+              onOpenDirectory={handleOpenDirectory}
+              onSelectFile={(path) => {
+                void openWorkspaceFile(path);
+              }}
+              onRefresh={() => {
+                void handleRefresh();
+              }}
+              onCreateFile={() => {
+                void handleCreateFile();
+              }}
+              onCreateFolder={() => {
+                void handleCreateFolder();
+              }}
+              onNavigateUp={() => {
+                void handleNavigateUp();
+              }}
+            />
+            <CodeEditor
+              code={editorCode}
+              fileName={fileName(selectedFilePath)}
+              statusText={editorStatus}
+              onCodeChange={handleCodeChange}
+            />
+          </div>
         </div>
         <div style={{ flex: '1 1 auto', overflow: 'hidden' }}>
           <OutputPanel
-            modelId={model.modelId ?? model.id}
+            modelId={modelId}
             pipelineTag={model.pipeline_tag}
             inputValue={inputValue}
           />

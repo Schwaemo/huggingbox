@@ -186,7 +186,7 @@ export default function SettingsView() {
     try {
       setEnvLoading(true);
       setEnvError(null);
-      const rows = await listModelEnvironments();
+      const rows = await listModelEnvironments(settings.envStoragePath);
       setModelEnvs(rows);
     } catch (error) {
       setEnvError(String(error));
@@ -197,7 +197,7 @@ export default function SettingsView() {
 
   useEffect(() => {
     void refreshModelEnvs();
-  }, []);
+  }, [settings.envStoragePath]);
 
   function normalizeStoragePath(input: string): string {
     const trimmed = input.trim();
@@ -235,7 +235,7 @@ export default function SettingsView() {
 
     try {
       setDeletingModelId(modelId);
-      await deleteModelEnvironment(modelId);
+      await deleteModelEnvironment(modelId, settings.envStoragePath);
       await refreshModelEnvs();
     } catch (error) {
       setEnvError(String(error));

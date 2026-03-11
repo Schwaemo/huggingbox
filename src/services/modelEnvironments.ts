@@ -12,8 +12,10 @@ interface ModelEnvironmentPayload {
   sizeBytes: number;
 }
 
-export async function listModelEnvironments(): Promise<ModelEnvironment[]> {
-  const rows = await invoke<ModelEnvironmentPayload[]>('list_model_environments');
+export async function listModelEnvironments(envStoragePath?: string): Promise<ModelEnvironment[]> {
+  const rows = await invoke<ModelEnvironmentPayload[]>('list_model_environments', {
+    envStoragePath: envStoragePath?.trim() ? envStoragePath.trim() : null,
+  });
   return rows.map((row) => ({
     modelId: row.modelId,
     pythonPath: row.pythonPath,
@@ -21,6 +23,9 @@ export async function listModelEnvironments(): Promise<ModelEnvironment[]> {
   }));
 }
 
-export async function deleteModelEnvironment(modelId: string): Promise<void> {
-  await invoke('delete_model_environment', { modelId });
+export async function deleteModelEnvironment(modelId: string, envStoragePath?: string): Promise<void> {
+  await invoke('delete_model_environment', {
+    modelId,
+    envStoragePath: envStoragePath?.trim() ? envStoragePath.trim() : null,
+  });
 }
