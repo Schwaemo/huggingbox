@@ -42,7 +42,7 @@ Rules:
 - Components go in src/components/{feature}/ one per file
 - Hooks go in src/hooks/
 - Services (API calls) go in src/services/
-- Never make network calls to domains other than api.anthropic.com and huggingface.co
+- Never make network calls to domains other than huggingface.co
 - Dark mode is default
 ```
 
@@ -71,7 +71,6 @@ Run this checklist:
 1. `npm run tauri dev` opens a window — yes/no
 2. `python --version` returns 3.11+ — yes/no
 3. `pip install transformers torch` succeeds — yes/no
-4. Your Anthropic API key works: go to console.anthropic.com, click the playground, send a test message — yes/no
 5. Your HF token works: go to huggingface.co/meta-llama/Llama-3.1-8B and check you can see the model page (you may need to accept the license first) — yes/no
 6. Git push to your repo works — yes/no
 

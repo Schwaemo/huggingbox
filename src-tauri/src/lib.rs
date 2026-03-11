@@ -199,6 +199,50 @@ async fn find_python(app: &AppHandle) -> Result<String, String> {
     Err("Python not found. Install Python 3.11+ or bundle Python into the app data directory.".to_string())
 }
 
+/// Returns the directory that *contains* the `hf_auto_runner` package so it
+/// can be prepended to PYTHONPATH. In a production bundle Tauri copies the
+/// folder into the resource dir; during `tauri dev` the source tree itself is
+/// used as a fallback.
+fn hf_auto_runner_parent_dir(app: &AppHandle) -> Option<PathBuf> {
+    // Production: Tauri puts bundled resources next to the binary.
+    if let Ok(res_dir) = app.path().resource_dir() {
+        let candidate = res_dir.join("hf_auto_runner");
+        if candidate.is_dir() {
+            // parent of hf_auto_runner/
+            if let Some(parent) = candidate.parent() {
+                return Some(parent.to_path_buf());
+            }
+        }
+    }
+
+    // Dev fallback: the source tree is two levels above src-tauri/
+    // (i.e., the workspace root where hf_auto_runner/ lives).
+    if let Ok(exe) = std::env::current_exe() {
+        // During `tauri dev` the exe is at target/debug/huggingbox(.exe)
+        // Walk up from the exe to find the workspace root containing hf_auto_runner.
+        let mut dir = exe.as_path();
+        for _ in 0..8 {
+            if let Some(parent) = dir.parent() {
+                if parent.join("hf_auto_runner").is_dir() {
+                    return Some(parent.to_path_buf());
+                }
+                dir = parent;
+            } else {
+                break;
+            }
+        }
+    }
+
+    // Last resort: current working directory
+    if let Ok(cwd) = std::env::current_dir() {
+        if cwd.join("hf_auto_runner").is_dir() {
+            return Some(cwd);
+        }
+    }
+
+    None
+}
+
 fn model_venv_dir(app: &AppHandle, model_id: &str) -> Result<PathBuf, String> {
     validate_model_id(model_id)?;
     let data_dir = app
@@ -780,10 +824,36 @@ async fn detect_python(app: AppHandle) -> PythonInfo {
 }
 
 #[tauri::command]
+async fn generate_python_code_local(app: AppHandle, model_id: String) -> Result<String, String> {
+    let python = find_python(&app).await?;
+    let mut cmd = tokio::process::Command::new(&python);
+    if let Some(pypath) = hf_auto_runner_parent_dir(&app) {
+        cmd.env("PYTHONPATH", pypath.to_string_lossy().to_string());
+    }
+    let output = cmd
+        .args(["-m", "hf_auto_runner", "generate", &model_id])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to call python hf_auto_runner script logic: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // It may fail but still print out valid JSON describing the failure gracefully
+        if stdout.contains("error") {
+            return Ok(stdout.to_string());
+        }
+        return Err(format!("Python hf_auto_runner failed. Code: {}\nOutput: {}", output.status, stderr));
+    }
+    
+    // Otherwise it passed, return JSON body
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+#[tauri::command]
 async fn run_python_code(
     app: AppHandle,
     handle: State<'_, ExecutionHandle>,
-    code: String,
     preferred_device: Option<String>,
     selected_gpu_id: Option<String>,
     model_id: Option<String>,
@@ -795,23 +865,17 @@ async fn run_python_code(
         }
     }
 
-    // Write code to a temp file
-    let temp_root = ensure_temp_workspace(&app)?;
-    let script_path = temp_root.join(format!(
-        "run_{}.py",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0)
-    ));
-    std::fs::write(&script_path, &code).map_err(|e| e.to_string())?;
-
     let python = resolve_python(&app, model_id.as_deref()).await?;
 
     let mut command = tokio::process::Command::new(&python);
     command
         .env("PYTHONIOENCODING", "utf-8")
         .env("PYTHONUTF8", "1");
+
+    // Ensure isolated venvs can find the hf_auto_runner package
+    if let Some(pypath) = hf_auto_runner_parent_dir(&app) {
+        command.env("PYTHONPATH", pypath.to_string_lossy().to_string());
+    }
 
     let device = preferred_device.unwrap_or_else(|| "auto".to_string()).to_lowercase();
     if device == "cpu" {
@@ -823,8 +887,13 @@ async fn run_python_code(
         }
     }
 
+    let model = model_id.unwrap_or_else(|| "".to_string());
+    if model.is_empty() {
+        return Err("Model ID is required for execution via hf_auto_runner.".to_string());
+    }
+
     let mut child = command
-        .arg(script_path.to_str().ok_or("invalid path")?)
+        .args(["-m", "hf_auto_runner", "run", &model])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -891,8 +960,6 @@ async fn run_python_code(
             let mut lock = pid_arc.lock().unwrap();
             *lock = None;
         }
-
-        let _ = std::fs::remove_file(&script_path);
 
         let _ = app_done.emit("execution-done", DonePayload { exit_code });
     });

@@ -12,7 +12,7 @@
 
 This plan breaks HuggingBox development into 10 sprints, each two weeks long. Each sprint targets a specific capability layer — starting with the UI shell and progressively adding model type compatibility. By the end of Sprint 10, the app supports the majority of models on Hugging Face across text, vision, audio, image generation, and multimodal categories.
 
-Each sprint includes a section on **agentic AI tooling** — the specific MCP servers, coding tools, skills, and techniques that an engineer using Claude Code, Cursor, or similar tools should leverage to maximise output quality and speed.
+Each sprint includes a section on **agentic AI tooling** — the specific MCP servers, coding tools, skills, and techniques that an engineer using Cursor/AI IDE, Cursor, or similar tools should leverage to maximise output quality and speed.
 
 ---
 
@@ -24,7 +24,7 @@ These tools and MCP servers should be configured from day one and used throughou
 
 | Tool | Purpose |
 |---|---|
-| **Claude Code** | Primary agentic coding tool. Terminal-based, 200K context, deep file editing. Use for backend logic, process management, complex integrations. |
+| **Cursor/AI IDE** | Primary agentic coding tool. Terminal-based, 200K context, deep file editing. Use for backend logic, process management, complex integrations. |
 | **Cursor** | IDE-based AI coding. Use for frontend React work, visual editing, tab completions. |
 | **GitHub Copilot** | Background completions and inline suggestions in VS Code. |
 
@@ -45,8 +45,8 @@ These tools and MCP servers should be configured from day one and used throughou
 | File | Purpose |
 |---|---|
 | `AGENTS.md` | Repository-level instructions for AI agents. Document architecture, conventions, file structure, and key decisions so any agentic tool entering the repo has full context. |
-| `.cursorrules` / `claude.md` | Tool-specific rules files defining coding style, framework conventions (React + TypeScript + Tailwind), component patterns, and project-specific constraints. |
-| `SKILL.md` files | If using Claude Code's skill system, define skills for code generation templates, model metadata parsing, and Python sidecar management. |
+| `.cursorrules` / `ai_instructions.md` | Tool-specific rules files defining coding style, framework conventions (React + TypeScript + Tailwind), component patterns, and project-specific constraints. |
+| `SKILL.md` files | If using Cursor/AI IDE's skill system, define skills for code generation templates, model metadata parsing, and Python sidecar management. |
 
 ---
 
@@ -80,7 +80,7 @@ These tools and MCP servers should be configured from day one and used throughou
 | **Figma MCP Server** | Design the three-panel layout in Figma first. Use the MCP server's `get_design_context` tool to extract structured React + Tailwind code directly into Cursor. This produces accurate layout, spacing, and component hierarchy from your design. The server supports Tauri as a target framework. |
 | **Figma MCP Pro** (`@artemsvit/figma-mcp-pro`) | Alternative community Figma MCP with explicit Tauri framework support, CSS generation from Figma properties, and batch asset downloads. Useful if the official server doesn't cover all edge cases. |
 | **Hugging Face MCP Server** | Use during development to test model search queries, validate API response structures, and understand what metadata fields are actually available vs. documented. Ask your AI assistant: "Search Hugging Face models for text-generation sorted by downloads" to verify your UI handles real data. |
-| **Claude Code** | Use for Tauri backend setup (Rust sidecar configuration, IPC between frontend and backend, window management). Claude Code handles Rust well and can scaffold the Tauri command handlers. |
+| **Cursor/AI IDE** | Use for Tauri backend setup (Rust sidecar configuration, IPC between frontend and backend, window management). Cursor/AI IDE handles Rust well and can scaffold the Tauri command handlers. |
 | **Cursor + Copilot** | Use for all React component development. The tab completions and inline suggestions are fastest for cranking out UI components with Tailwind. |
 | **Playwright MCP Server** | Set up E2E test scaffolding from Sprint 1. Write initial tests for: app launches, model search returns results, model detail page renders. |
 | **Context7 MCP** | Pulls up-to-date documentation for libraries. Use it to fetch current Tauri v2 docs, Monaco Editor API docs, and Zustand patterns without relying on stale training data. |
@@ -117,7 +117,7 @@ Add to `AGENTS.md`:
 
 | Tool / MCP | How to Use It |
 |---|---|
-| **Claude Code** | This sprint is heavy on systems work (process management, IPC, streaming). Claude Code excels here — use it for the Rust-side sidecar management, subprocess spawning, and stdout piping logic. |
+| **Cursor/AI IDE** | This sprint is heavy on systems work (process management, IPC, streaming). Cursor/AI IDE excels here — use it for the Rust-side sidecar management, subprocess spawning, and stdout piping logic. |
 | **File System MCP** | Managing the bundled Python environment, model storage paths, and temp directories. Use to verify file operations work correctly across Windows paths. |
 | **SQLite MCP Server** | Set up the local database schema: `models` table (id, name, pipeline_tag, path, last_used), `code_cache` table (model_id, hardware_hash, code, created_at), `dependencies` table. |
 | **Playwright MCP** | E2E tests for the full run cycle: paste code → click run → verify output appears in panel. |
@@ -137,24 +137,24 @@ This avoids embedding Python in the app binary. The Python environment lives in 
 
 ---
 
-## Sprint 3: Claude Code Generation & Text Generation Models (LLMs)
+## Sprint 3: Cursor/AI IDE Generation & Text Generation Models (LLMs)
 
 **Duration:** Weeks 5–6
-**Goal:** Claude API integration for code generation. Full support for text-generation models, including GGUF quantized LLMs.
+**Goal:** hf_auto_runner integration for code generating. Full support for text-generation models, including GGUF quantized LLMs.
 
 ### Deliverables
 
-- Claude API integration: send model card + metadata + system specs → receive generated Python code
+- hf_auto_runner integration: send model card + metadata + system specs → receive generated Python code
 - Code appears in Monaco editor with syntax highlighting and comments
 - "Regenerate" button for fresh code generation
 - Code caching: store generated code per model ID + hardware hash in SQLite
-- Fallback: local code templates for text-generation pipeline when Claude API unavailable
+- Fallback: local code templates for text-generation pipeline when hf_auto_runner unavailable
 - **GGUF LLM support:** detect GGUF files in model repo, generate code using `llama-cpp-python`
 - **Transformers LLM support:** generate code using `transformers` pipeline for `.safetensors` / `.bin` models
 - Streaming token output: live typewriter display in Output Panel
 - Hardware-aware code generation: CPU vs GPU, float16 vs float32, quantization selection
 - Model download manager: download model files from HF with progress bar, pause/resume
-- Device detection: RAM, GPU presence (CUDA/Metal), VRAM — passed to Claude for code generation
+- Device detection: RAM, GPU presence (CUDA/Metal), VRAM — passed to the system for code generation
 
 ### Pre-installed Python Packages (added to base environment)
 
@@ -171,13 +171,13 @@ This avoids embedding Python in the app binary. The Python environment lives in 
 | Tool / MCP | How to Use It |
 |---|---|
 | **Hugging Face MCP Server** | Critical this sprint. Use to research model card structures for popular LLMs: what metadata is available, how pipeline_tag maps to actual usage, what file formats are present. Test queries like "Search for GGUF text-generation models" to understand the data your code generation prompt will receive. |
-| **Claude Code** | Write the Claude API integration itself. Use Claude Code to generate the prompt engineering for the code generation system — meta-level: using Claude to write the prompts that Claude will use in production. |
+| **Cursor/AI IDE** | Write the hf_auto_runner integration itself. Use Cursor/AI IDE to generate the prompt engineering for the code generation system — meta-level: using the system to write the prompts that the system will use in production. |
 | **Memory MCP Server** | Store your prompt engineering iterations. As you refine the code generation prompt, save versions and their output quality in the knowledge graph so you can A/B test approaches across sessions. |
 | **Brave Search / Web Search MCP** | Research `llama-cpp-python` API patterns, quantization options, and streaming interfaces. Training data may be stale on these fast-moving libraries. |
 
 ### Code Generation Prompt Architecture
 
-The prompt sent to Claude should include:
+The prompt sent to the system should include:
 ```
 System: You are a code generator for a local model testing app.
 Generate a complete, self-contained Python script that:
@@ -266,7 +266,7 @@ Context:
 |---|---|
 | **Hugging Face MCP Server** | Research popular vision models and their specific requirements. Many vision models have non-standard preprocessing. Use: "Find top image-classification models sorted by downloads" and inspect their model cards for code examples. |
 | **Figma MCP Server** | Design the image viewer with overlay system — bounding boxes need to scale correctly, masks need opacity controls, labels need positioning. This is a non-trivial UI component worth designing properly. |
-| **Claude Code** | Generate the Python-side image handling: loading with Pillow, preprocessing tensors, postprocessing bounding boxes/masks back to image coordinates. This involves coordinate math that benefits from Claude's reasoning. |
+| **Cursor/AI IDE** | Generate the Python-side image handling: loading with Pillow, preprocessing tensors, postprocessing bounding boxes/masks back to image coordinates. This involves coordinate math that benefits from the system's reasoning. |
 | **File System MCP** | Manage temp image files — uploaded inputs, annotated outputs, intermediate results. Ensure cleanup on session end. |
 
 ### Key Technical Challenge
@@ -308,7 +308,7 @@ Bounding box and segmentation mask rendering in the Output Panel requires a canv
 | Tool / MCP | How to Use It |
 |---|---|
 | **Hugging Face MCP Server** | Research audio model landscape. Whisper variants dominate ASR; identify top TTS models (Bark, VITS, SpeechT5). Check which formats they expect and what their output looks like. |
-| **Claude Code** | Audio processing has many edge cases: sample rate conversion, mono/stereo handling, chunked processing for long audio. Claude Code can generate robust audio preprocessing code with proper error handling. |
+| **Cursor/AI IDE** | Audio processing has many edge cases: sample rate conversion, mono/stereo handling, chunked processing for long audio. Cursor/AI IDE can generate robust audio preprocessing code with proper error handling. |
 | **Figma MCP Server** | Design the waveform visualisation component and audio player controls. This is a distinctive UI element that differentiates the app. |
 | **Playwright MCP** | E2E testing with audio is tricky. Use Playwright to test the upload flow with fixture audio files. Test transcript rendering and audio playback controls. |
 
@@ -349,7 +349,7 @@ Audio models often require specific sample rates (16kHz for Whisper). The genera
 | Tool / MCP | How to Use It |
 |---|---|
 | **Hugging Face MCP Server** | Diffusion models have complex configurations. Use MCP to inspect model cards for Stable Diffusion variants, understand which schedulers they support, and what their recommended settings are. |
-| **Claude Code** | Diffusion pipeline code is complex — loading the correct scheduler, enabling attention slicing for low-VRAM GPUs, half-precision casting. Claude Code can generate comprehensive code with all the memory optimisation flags. |
+| **Cursor/AI IDE** | Diffusion pipeline code is complex — loading the correct scheduler, enabling attention slicing for low-VRAM GPUs, half-precision casting. Cursor/AI IDE can generate comprehensive code with all the memory optimisation flags. |
 | **Figma MCP Server** | Design the image gallery grid, the generation parameters panel (sliders, seed input, negative prompt), and the progress overlay. This is the most visually rich sprint. |
 | **Memory MCP Server** | Track which diffusion model configurations work on which hardware profiles. Store successful generation parameters so the code generation prompt can reference them. |
 
@@ -390,7 +390,7 @@ Diffusion models are the most resource-intensive category. The code generation m
 | Tool / MCP | How to Use It |
 |---|---|
 | **Hugging Face MCP Server** | VLM architectures vary significantly. Use MCP to inspect model cards for LLaVA, InternVL, Qwen-VL families. Understand their input format requirements — some expect chat-style messages, others expect separate image/text inputs. |
-| **Claude Code** | Multi-turn VLM conversation logic is complex. The generated code needs to manage conversation history, image context, and model-specific formatting. Claude Code's large context window helps here. |
+| **Cursor/AI IDE** | Multi-turn VLM conversation logic is complex. The generated code needs to manage conversation history, image context, and model-specific formatting. Cursor/AI IDE's large context window helps here. |
 | **Figma MCP Server** | Design the dual-input interface: image preview + text input + conversation history. This is a new layout pattern distinct from single-input sprints. |
 
 ### Key Technical Challenge
@@ -400,7 +400,7 @@ VLMs have the most fragmented interface landscape:
 - Qwen-VL: specific message format with image URLs
 - Florence: task-prefix prompts (`<CAPTION>`, `<OD>`, etc.)
 
-The code generation prompt must understand each architecture family and produce the correct input formatting. This is where Claude reading the model card becomes most valuable — the model card usually shows the exact input format.
+The code generation prompt must understand each architecture family and produce the correct input formatting. This is where the system reading the model card becomes most valuable — the model card usually shows the exact input format.
 
 ---
 
@@ -431,7 +431,7 @@ The code generation prompt must understand each architecture family and produce 
 | Tool / MCP | How to Use It |
 |---|---|
 | **Hugging Face MCP Server** | Research which popular models have ONNX variants. Many models have community-contributed ONNX conversions. Use MCP to find these and test compatibility. |
-| **Claude Code** | GPU detection logic (CUDA version, driver compatibility, VRAM measurement) and ONNX Runtime provider configuration are systems-level work. Claude Code handles this well. |
+| **Cursor/AI IDE** | GPU detection logic (CUDA version, driver compatibility, VRAM measurement) and ONNX Runtime provider configuration are systems-level work. Cursor/AI IDE handles this well. |
 | **Brave Search / Web Search MCP** | Research ONNX Runtime execution providers, CUDA toolkit compatibility matrices, and quantisation performance benchmarks. This information changes frequently. |
 | **SQLite MCP Server** | Extend the database with a `benchmarks` table to store performance results per model per hardware configuration. This data can inform future code generation. |
 
@@ -448,9 +448,9 @@ The code generation prompt must understand each architecture family and produce 
 - **Linux build:** Tauri Linux target, CUDA/ROCm detection, AppImage packaging
 - **Installer experience:** clean install flow, Python environment setup with progress
 - **Onboarding:** first-launch wizard (detect hardware, set model storage directory, optional HF token)
-- **Settings panel:** model storage path, theme, Claude API key, HF token, default parameters
+- **Settings panel:** model storage path, theme, hf_auto_runner key, HF token, default parameters
 - **Error recovery:** automatic retry on transient failures, clear error messages with suggested fixes
-- **Offline mode:** fallback templates when Claude API unreachable, cached model metadata
+- **Offline mode:** fallback templates when hf_auto_runner unreachable, cached model metadata
 - **Update system:** app update checks, model metadata refresh
 - **Analytics foundation:** opt-in usage tracking (what pipeline types are used, success rates)
 - **Documentation:** README, user guide, FAQ, troubleshooting
@@ -459,7 +459,7 @@ The code generation prompt must understand each architecture family and produce 
 
 | Tool / MCP | How to Use It |
 |---|---|
-| **Claude Code** | Platform-specific Rust code for macOS (Metal detection, DMG packaging) and Linux (AppImage, GPU driver detection). Claude Code handles Rust and cross-platform conditionals well. |
+| **Cursor/AI IDE** | Platform-specific Rust code for macOS (Metal detection, DMG packaging) and Linux (AppImage, GPU driver detection). Cursor/AI IDE handles Rust and cross-platform conditionals well. |
 | **GitHub MCP Server** | Release management: create release tags, upload build artifacts, manage changelogs. Automate the release pipeline through MCP. |
 | **Playwright MCP Server** | Full regression E2E test suite across all pipeline types. Run on all three platforms. |
 | **Figma MCP Server** | Final polish pass: onboarding screens, settings panel, error states, empty states. Design these in Figma and extract to code. |
@@ -472,7 +472,7 @@ The code generation prompt must understand each architecture family and produce 
 ```
 Week  1-2   Sprint 1   App Shell & UI Foundation
 Week  3-4   Sprint 2   Python Sidecar & Execution Engine
-Week  5-6   Sprint 3   Claude Code Generation & LLMs
+Week  5-6   Sprint 3   Cursor/AI IDE Generation & LLMs
 Week  7-8   Sprint 4   Text Classification, Summarization & Embeddings
 Week  9-10  Sprint 5   Vision Models
 Week 11-12  Sprint 6   Audio Models
@@ -502,7 +502,7 @@ Week 19-20  Sprint 10  Cross-Platform, Polish & Launch
 
 This table shows which MCP servers and tools are most critical per sprint.
 
-| Sprint | Figma MCP | HF MCP | Claude Code | Cursor | Playwright | GitHub MCP | SQLite MCP | Memory MCP |
+| Sprint | Figma MCP | HF MCP | Cursor/AI IDE | Cursor | Playwright | GitHub MCP | SQLite MCP | Memory MCP |
 |---|---|---|---|---|---|---|---|---|
 | 1 - UI Shell | **Critical** | High | High | **Critical** | Medium | Medium | Low | Low |
 | 2 - Sidecar | Low | Low | **Critical** | Medium | High | Medium | **Critical** | Low |
@@ -538,7 +538,7 @@ These are optional but can significantly accelerate specific tasks:
 Based on the GitHub Spec Kit approach, each sprint should follow this workflow:
 
 1. **Write the spec first.** Define inputs, outputs, components, and API contracts in a markdown spec before writing code.
-2. **Give the spec to your AI agent.** Claude Code or Cursor reads the spec and generates implementation aligned with the contract.
+2. **Give the spec to your AI agent.** Cursor/AI IDE or Cursor reads the spec and generates implementation aligned with the contract.
 3. **Use the spec for testing.** E2E tests validate against the spec, not just the code.
 4. **Update the spec when requirements change.** The spec is the source of truth, not the implementation.
 
@@ -552,9 +552,9 @@ This pairs naturally with `AGENTS.md` — together they give any AI agent enteri
 |---|---|---|
 | 1 | Tauri v2 React integration issues | Fall back to Electron if blocking. Both support Monaco and Python sidecars. |
 | 2 | Python packaging size bloats installer | Ship CPU-only PyTorch initially (~800MB). GPU support as optional download. |
-| 3 | Claude generates incorrect code for edge-case models | Code is visible and editable. Maintain a "known-good" test suite of 20 popular models. |
-| 4 | Too many pipeline type variants to template | Focus on the 5 most popular, use Claude generation for the rest. |
-| 5 | Vision model preprocessing varies wildly | Lean on Claude reading the model card. Include `torchvision.transforms` in generated code. |
+| 3 | the system generates incorrect code for edge-case models | Code is visible and editable. Maintain a "known-good" test suite of 20 popular models. |
+| 4 | Too many pipeline type variants to template | Focus on the 5 most popular, use the system generation for the rest. |
+| 5 | Vision model preprocessing varies wildly | Lean on the system reading the model card. Include `torchvision.transforms` in generated code. |
 | 6 | Audio format handling is fragile | Bundle ffmpeg. Always convert to WAV 16kHz before inference. |
 | 7 | Diffusion models exceed user VRAM | Default to fp16 + attention slicing. Recommend smaller models for <8GB VRAM. |
 | 8 | VLM architectures too fragmented | Support top 3 families (LLaVA, Qwen-VL, Florence) first. Add others post-launch. |

@@ -13,20 +13,39 @@
 
 ### 1.1 Vision
 
-HuggingBox is a cross-platform desktop application that turns Hugging Face into a local AI app store. Users browse models, click one, and get auto-generated Python code ready to run on their machine — no terminal, no environment setup, no guesswork.
-
-### 1.2 One-Line Description
-
-The fastest way to go from discovering a model on Hugging Face to running real code against it locally.
+HuggingBox is a cross-platform desktop application that turns Hugging Face into a local AI app store. Users browse models, click one, and get deterministically-generated Python code ready to run on their machine via `hf_auto_runner` — no terminal, no environment setup, no guesswork.
 
 ### 1.3 Core Insight
 
-Every Hugging Face model already ships with example code and metadata describing how to run it. Instead of building a universal runtime abstraction, HuggingBox uses Claude to read model cards and generate correct, well-commented, editable Python code for the user. The generated code is visible, editable, and educational — not hidden behind a button.
+Instead of building a universal runtime abstraction, HuggingBox uses a deterministic `hf_auto_runner` to read model cards, config.json, and metadata to generate correct, well-commented, editable Python code for the user.
 
 ### 1.4 Target Users
 
 | Segment | Description | Primary Need |
 |---|---|---|
+| **Curious beginners** | Non-technical users who want to try AI models | One-click code generation, guided experience |
+| **Students & learners** | CS/ML students exploring model architectures | Readable, well-commented generated code |
+| **Intermediate developers** | Developers who know Python but not the ML ecosystem | Skip boilerplate, jump straight to experimentation |
+| **Advanced practitioners** | ML engineers evaluating models quickly | Fast local testing, full code control |
+
+---
+
+## 2. Competitive Landscape
+
+| Product | Local Inference | Model Browsing | Multi-Modal | Code Visibility | Cross-Platform |
+|---|---|---|---|---|---|
+| Hugging Face Spaces | No (remote) | Yes | Yes | No | Web only |
+| Ollama | Yes | Limited | LLMs only | No | Desktop |
+| LM Studio | Yes | Own catalogue | LLMs only | No | Desktop |
+| GPT4All | Yes | Limited | LLMs only | No | Desktop |
+| WebLLM | Yes (browser) | No | LLMs only | No | Web only |
+| **HuggingBox** | **Yes** | **Full HF catalogue** | **Yes** | **Yes (editable)** | **Desktop → all** |
+
+### 2.1 Key Differentiator
+
+No existing product combines Hugging Face catalogue browsing, local multi-modal execution, and visible/editable generated code. The closest analogy is \"a local Jupyter notebook that writes itself, connected to every model on Hugging Face.\"
+
+---|---|---|
 | **Curious beginners** | Non-technical users who want to try AI models | One-click code generation, guided experience |
 | **Students & learners** | CS/ML students exploring model architectures | Readable, well-commented generated code |
 | **Intermediate developers** | Developers who know Python but not the ML ecosystem | Skip boilerplate, jump straight to experimentation |
@@ -61,7 +80,7 @@ Open app
   → Click a model
   → View model card: description, size, RAM estimate, pipeline type
   → Click "Generate Code"
-  → Claude reads model card + metadata, generates Python code
+  → hf_auto_runner inspects model metadata via huggingface_hub, detects architecture, selects runtime, and generates deterministic Python code
   → Code appears in embedded editor (Monaco)
   → User reviews / edits code (optional)
   → Click "Run"
@@ -121,13 +140,13 @@ Open app
         ┌──────────┴──────────┐
         │                     │
    ┌────▼─────┐       ┌──────▼───────┐
-   │ Claude   │       │   Python     │
-   │ API      │       │   Sidecar    │
+   │ hf_auto_ │       │   Python     │
+   │ runner   │       │   Sidecar    │
    │          │       │              │
-   │ Reads    │       │ Executes     │
-   │ model    │       │ generated    │
-   │ cards,   │       │ code in      │
-   │ generates│       │ managed      │
+   │ Inspects │       │ Executes     │
+    │ metadata,│       │ generated    │
+    │ generates│       │ code in      │
+    │ code     │       │ managed      │
    │ code     │       │ environment  │
    └──────────┘       └──────────────┘
 ```
@@ -148,8 +167,8 @@ Open app
 
 | Component | Technology | Purpose |
 |---|---|---|
-| LLM provider | Claude API (claude-sonnet-4-20250514) | Generate inference code from model cards |
-| Prompt engine | Custom prompt templates | Structured prompts per pipeline type |
+| Code Generator | hf_auto_runner (deterministic Python system) | Generate inference code from config.json and architecture type |
+| Runtime Router | Architecture matching logic | Route to correct runtime based on config.json |
 | Code cache | Local SQLite | Cache generated code per model to reduce API calls |
 
 #### Execution Layer
@@ -179,24 +198,19 @@ Open app
 When a user selects a model, the app:
 
 1. Fetches model metadata from the Hugging Face API (pipeline_tag, model card, file list, config).
-2. Constructs a prompt for Claude containing the model card content, pipeline type, available files, and user's system specs (RAM, GPU).
-3. Claude generates well-commented Python code tailored to the model.
+2. Invokes hf_auto_runner which reads config.json, detects the architecture, selects the runtime, and considers user's system specs (RAM, GPU).
+3. hf_auto_runner deterministically orchestrates environment creation, package installation, and emits execution script via script_generator.py.
 4. The generated code appears in the Monaco editor.
 5. The user can edit, then run.
 
 ### 5.2 Prompt Structure
 
-The Claude prompt should include:
-
+The code generation logic factors in:
 - Model ID and pipeline type
-- Model card content (truncated if needed)
-- Available file formats (.safetensors, .gguf, .onnx)
+- `config.json` (model_type, architectures)
+- File formats (.gguf vs .safetensors)
 - User's hardware profile (RAM, GPU type, VRAM)
 - Target output format (stdout for text, file path for images/audio)
-- Instruction to generate educational, well-commented code
-- Instruction to include appropriate device selection (CPU/GPU)
-- Instruction to include memory-efficient loading where applicable (quantization, dtype)
-
 ### 5.3 Code Style Requirements
 
 All generated code must:
@@ -217,10 +231,7 @@ All generated code must:
 
 ### 5.5 Fallback Behavior
 
-If Claude API is unavailable:
-
-- Fall back to a local template library covering the ~15 most common pipeline types
-- Templates are parameterized with model ID and basic config
+Since hf_auto_runner is local, offline mode is fully supported (as long as models are downloaded).
 - Mark the code as "template-generated" in the editor with a note that richer generation is available when online
 
 ---
@@ -391,7 +402,7 @@ On first launch and periodically, detect:
 | Disk space | Filesystem query | Download feasibility |
 | OS and architecture | System info | Environment compatibility |
 
-Surface this information in a "System Info" panel in settings and use it to inform Claude's code generation (e.g., generate CPU-only code if no GPU detected, use float16 if GPU supports it).
+Surface this information in a "System Info" panel in settings and use it to inform the deterministic code generation logic (e.g., generate CPU-only code if no GPU detected, use float16 if GPU supports it).
 
 ---
 
@@ -407,14 +418,14 @@ Surface this information in a "System Info" panel in settings and use it to info
 
 4. **Education built in.** Every generated code snippet includes comments explaining what's happening. Users learn ML engineering patterns by using the app.
 
-5. **Local first.** All inference runs on the user's device. The only external calls are to the Hugging Face API (model metadata) and Claude API (code generation).
+5. **Local first.** All inference runs on the user's device. The only external calls are to the Hugging Face API (model metadata) .
 
 ### 10.2 Technical Principles
 
 1. **Prefer Tauri over Electron.** Smaller binary size, lower memory overhead, Rust backend for process management.
 2. **Python is an execution target, not a distribution dependency.** The Python environment is managed, not exposed to the user.
 3. **Cache aggressively.** Model metadata, generated code, dependency resolution results — minimize redundant API calls and computation.
-4. **Degrade gracefully.** If Claude API is down, use local templates. If GPU is unavailable, default to CPU. If RAM is tight, suggest quantized models.
+4. **Degrade gracefully.** If model config is unknown, fall back to generic transformers loader. If GPU is unavailable, default to CPU. If RAM is tight, suggest quantized models.
 
 ---
 
@@ -428,7 +439,7 @@ Surface this information in a "System Info" panel in settings and use it to info
 
 - Tauri desktop shell with React frontend
 - Model browser connected to Hugging Face API (search, filter, model detail pages)
-- Claude API integration for code generation
+- hf_auto_runner integration for code generation
 - Monaco editor embedded in app
 - Python sidecar with bundled environment (transformers, torch CPU, onnxruntime)
 - Execution engine: spawn Python process, stream stdout to output panel
@@ -492,11 +503,11 @@ Surface this information in a "System Info" panel in settings and use it to info
 
 | Risk | Severity | Mitigation |
 |---|---|---|
-| Claude generates incorrect/broken code | High | Code is visible and editable. Fallback to local templates. Cache known-good generations. Build a test suite against popular models. |
+| hf_auto_runner generates incorrect/broken code | High | Code is visible and editable. Fallback to local templates. Cache known-good generations. Build a test suite against popular models. |
 | Python environment packaging bloats installer | High | Use Tauri (smaller base). Offer "minimal install" (CPU only, ~2GB) and "full install" (GPU, ~5GB). Download GPU support on demand. |
-| Hugging Face model metadata is inconsistent | Medium | Build a supplementary compatibility database for popular models. Use Claude to handle edge cases. Allow user to manually select pipeline type. |
+| Hugging Face model metadata is inconsistent | Medium | Build a supplementary compatibility database for popular models. Continuously update runtime_router.py to handle edge cases. Allow user to manually select pipeline type. |
 | OOM crashes on user devices | High | Conservative RAM estimates. Clear warnings before download. Monitor memory during execution. Suggest quantized alternatives when available. |
-| Claude API costs scale with usage | Medium | Aggressive code caching. Local template fallback. Consider "bring your own API key" for power users. |
+| Maintenance of deterministic rules | Medium | Keep script_generator.py templates updated for new popular architectures. |
 | Model authors change formats or break compatibility | Medium | Pin model revisions on download. Check for updates but don't auto-update. |
 | Security risk from executing user-editable code | Low | Code runs in a managed Python environment. No elevated privileges. Users already trust local code execution (same model as VS Code terminals). Document the trust model clearly. |
 
@@ -530,7 +541,7 @@ Surface this information in a "System Info" panel in settings and use it to info
 ## 14. Open Questions
 
 1. **Naming:** "HuggingBox" is a working title. Final name TBD.
-2. **Monetization:** Free with bundled Claude API usage? Freemium with limited generations? Bring your own API key?
+2. **Monetization:** Completely free and offline since code generation uses deterministic heuristics without LLM cost.
 3. **Hugging Face partnership:** Should this integrate formally with Hugging Face (OAuth, gated model access) from Phase 1 or later?
 4. **Offline mode:** Should the code generation layer have a robust offline fallback (local small LLM for code gen) or is "templates only" sufficient?
 5. **Telemetry:** What usage data, if any, should be collected? Opt-in analytics for improving code generation quality?

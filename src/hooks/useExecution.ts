@@ -2,13 +2,7 @@ import { useEffect, useRef, useCallback } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../stores/appStore';
-import { parseImports, getInstallablePackages } from '../utils/importParser';
 import { listDownloadedModels } from '../services/modelStorage';
-
-interface ModelDependencyProbeResult {
-  missingPackages: string[];
-  compatibilityError: string | null;
-}
 
 /**
  * Manages Python code execution via Tauri commands.
@@ -116,7 +110,6 @@ export function useExecution() {
   // ── Run ──────────────────────────────────────────────────────────────────
 
   const runCode = useCallback(async (
-    code: string,
     options?: {
       modelId?: string;
       storagePath?: string;
@@ -200,38 +193,7 @@ export function useExecution() {
       }
     }
 
-    // Check for missing packages first
-    const modules = parseImports(code);
-    const importPackages = getInstallablePackages(modules);
-    let modelProbePackages: string[] = [];
-
-    if (options?.modelId) {
-      try {
-        const probe = await invoke<ModelDependencyProbeResult>('probe_model_dependencies', {
-          modelId: options.modelId,
-          hfToken: options.hfToken || null,
-        });
-        modelProbePackages = probe.missingPackages ?? [];
-        if (probe.compatibilityError) {
-          store.setExecutionState('error');
-          store.setExecutionError(probe.compatibilityError);
-          store.setDownloadStats(null);
-          return;
-        }
-        if (modelProbePackages.length > 0) {
-          store.appendExecutionOutput(
-            `[HuggingBox] Model preflight found additional dependencies: ${modelProbePackages.join(', ')}\n`
-          );
-        }
-      } catch (err) {
-        // Non-fatal: execution can still continue using import-based dependency checks.
-        store.appendExecutionOutput(
-          `[HuggingBox] Dependency preflight skipped: ${String(err)}\n`
-        );
-      }
-    }
-
-    const packages = Array.from(new Set([...importPackages, ...modelProbePackages]));
+    const packages: string[] = [];
 
     if (packages.length > 0) {
       try {
@@ -277,7 +239,6 @@ export function useExecution() {
 
     try {
       await invoke('run_python_code', {
-        code,
         preferredDevice: options?.preferredDevice ?? 'auto',
         selectedGpuId: options?.selectedGpuId ?? null,
         modelId: options?.modelId ?? null,

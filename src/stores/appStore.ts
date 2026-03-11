@@ -58,7 +58,6 @@ export interface SystemInfo {
 }
 
 export interface AppSettings {
-  claudeApiKey: string;
   hfToken: string;
   modelStoragePath: string;
   preferredDevice: 'auto' | 'cpu' | 'cuda';
@@ -219,7 +218,6 @@ export const useAppStore = create<AppStore>((set) => ({
 
   // Settings
   settings: {
-    claudeApiKey: '',
     hfToken: '',
     modelStoragePath: '~/HuggingBox/models/',
     preferredDevice: 'auto',

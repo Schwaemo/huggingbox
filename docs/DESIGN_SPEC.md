@@ -15,9 +15,7 @@ These were open questions in the PRD. They are now settled.
 
 | Decision | Resolution | Implication |
 |---|---|---|
-| **Claude API key** | Bring your own key (BYOK). Users enter their own Anthropic API key. | No Anthropic billing on our side. API key stored locally, never transmitted beyond Claude's API endpoint. Settings must include clear instructions for obtaining a key. |
-| **Offline mode** | No offline mode. The app requires internet for Claude code generation and Hugging Face model browsing. | No local template fallback system. No offline-first architecture. If Claude API is unreachable, show a clear error with retry. If HF API is unreachable, show cached model list if previously browsed, otherwise show error. |
-| **User data collection** | Zero telemetry. No analytics. No usage tracking. No crash reporting. No data leaves the user's machine except calls to Claude API and Hugging Face API. | No Sentry. No Mixpanel. No PostHog. No opt-in analytics. The only outbound network calls are to `api.anthropic.com` and `huggingface.co`. |
+| **Offline mode** | Full offline support. The app requires internet only to download model weights and metadata. Operations on downloaded models run fully locally. || **User data collection** | Zero telemetry. No analytics. No usage tracking. No crash reporting. No data leaves the user's machine except calls to the Hugging Face API. | No Sentry. No Mixpanel. No PostHog. No opt-in analytics. The only outbound network calls are to `huggingface.co`. |
 | **Product name** | HuggingBox (working title, subject to change). | Use "HuggingBox" throughout the UI. |
 
 ---
@@ -346,14 +344,6 @@ Phase 2 (after code generation): The view transitions to the three-panel workspa
 
 **Sections:**
 
-**1. Claude API Key**
-- Label: "Anthropic API Key"
-- Input: Password field (masked by default) with show/hide toggle.
-- Helper text: "Required for code generation. Get your API key at console.anthropic.com"
-- "console.anthropic.com" is a clickable link that opens in external browser.
-- Validation: On blur, make a minimal API call to verify the key is valid. Show green checkmark or red X inline.
-- The key is stored in the app's local config file. Never transmitted anywhere except `api.anthropic.com`.
-
 **2. Hugging Face Token (Optional)**
 - Label: "Hugging Face Token (optional)"
 - Input: Password field with show/hide toggle.
@@ -396,14 +386,7 @@ No other settings. Keep it minimal.
    │  Welcome to HuggingBox                      │
    │                                             │
    │  Run Hugging Face models locally            │
-   │  with AI-generated code.                    │
-   │                                             │
-   │  To get started, enter your Anthropic       │
-   │  API key. This is required to generate      │
-   │  code for models.                           │
-   │                                             │
-   │  [API Key input field              ]        │
-   │  Get a key at console.anthropic.com ↗       │
+   │  with deterministically generated code.     │
    │                                             │
    │  Hugging Face Token (optional):             │
    │  [HF Token input field             ]        │
@@ -416,13 +399,10 @@ No other settings. Keep it minimal.
    │                                             │
    └─────────────────────────────────────────────┘
 
-3. "Get Started" is disabled until API key field is non-empty.
-4. On click "Get Started":
-   - Validate API key (single API call).
-   - If valid: save key, save HF token if provided, save storage path, 
+3. \"Get Started\" is enabled by default.
+4. On click \"Get Started\":
+   - Save HF token if provided, save storage path, 
      transition to Browse view.
-   - If invalid: show inline error "Invalid API key. Please check and try again." 
-     Button re-enables.
 5. Hardware detection runs in background during welcome screen.
    Results populate the status bar when Browse view loads.
 ```
@@ -459,27 +439,19 @@ No other settings. Keep it minimal.
    - Text changes to "Generating..."
    - Spinner icon replaces the normal icon.
    - Button is disabled.
-5. App constructs Claude API request:
-   - System prompt (see Section 5)
-   - Model ID, pipeline_tag, file list, model card excerpt
-   - User hardware profile from status bar (RAM, GPU, VRAM)
-6. Claude API call fires.
+5. App invokes `hf_auto_runner run {model_id}` which:
+   - Inspects model config via `huggingface_hub`
+   - Routes to correct runtime (llama.cpp, diffusers, transformers)
+   - Generates deterministic inference script
+   - Passes in user hardware profile
+6. `hf_auto_runner` performs code generation locally.
    - On success: 
      - View transitions to Phase 2 (three-panel layout).
      - Generated code populates Monaco editor with Python syntax highlighting.
-     - Code is cached in SQLite (keyed by model_id + hardware_hash).
      - Input Panel pre-fills with appropriate input widget for the pipeline type.
-   - On error (API key invalid): 
-     - Show modal: "Your API key appears to be invalid. Please update it in Settings."
-     - Two buttons: "Open Settings" (primary), "Dismiss" (ghost).
-   - On error (rate limit): 
-     - Show inline error below button: "Rate limited. Please wait a moment and try again."
-     - Button re-enables after 10 seconds.
-   - On error (network): 
-     - Show inline error: "Couldn't reach Claude API. Check your connection."
-     - "Retry" button.
+
 7. "Regenerate" button (top-right of editor area, ghost style):
-   - Makes a new Claude API call, replaces editor contents.
+   - Reruns the deterministic generation system, replaces editor contents.
    - Confirmation if user has edited the code: 
      "You've edited the code. Regenerating will replace your changes. Continue?"
      Buttons: "Regenerate" (secondary), "Cancel" (ghost).
@@ -660,88 +632,27 @@ Each pipeline type has a specific output renderer in the Output Panel. The rende
 
 ## 5. Code Generation Specification
 
-### 5.1 Claude API Call Structure
+### 5.1 hf_auto_runner Structure
 
-Every code generation request follows this exact structure:
+Every code generation request invokes `hf_auto_runner run <model_id>`. This executes deterministically from Python.
+### 5.2 Deterministic Prompt Rules
 
-```javascript
-const response = await fetch("https://api.anthropic.com/v1/messages", {
-  method: "POST",
-  headers: {
-    "Content-Type": "application/json",
-    "x-api-key": userApiKey,          // From settings
-    "anthropic-version": "2023-06-01"
-  },
-  body: JSON.stringify({
-    model: "claude-sonnet-4-20250514",
-    max_tokens: 4096,
-    system: SYSTEM_PROMPT,
-    messages: [{
-      role: "user",
-      content: userPrompt
-    }]
-  })
-});
-```
-
-Always use `claude-sonnet-4-20250514`. Never use a different model. Sonnet balances quality with speed and cost for code generation.
-
-### 5.2 System Prompt
-
-```
-You are a code generator for HuggingBox, a desktop app that runs Hugging Face
-models locally. Generate a complete, self-contained Python script.
-
+The Python scripts are generated based on `config.json`.
 RULES:
-1. The script must be fully self-contained. Only import from packages available
-   in the user's environment (listed below).
-2. Include educational comments explaining what each major block does and why.
-3. Handle common errors gracefully:
-   - Catch OutOfMemoryError and suggest reducing precision or model size.
-   - Catch CUDA-related errors and fall back to CPU with a printed warning.
-   - Catch FileNotFoundError for model files.
-4. Use streaming output where applicable (token-by-token for text generation).
-5. Print all text output to stdout. Save all file output (images, audio) to
-   the specified output directory.
-6. Respect the user's hardware constraints. Default to CPU if no GPU available.
-   Use float16 on GPU when VRAM is limited.
-7. Never include pip install commands in the script. Dependencies are managed
-   by the app.
-8. Never include input() calls or any interactive prompts.
-9. Use the exact model ID provided. Never substitute a different model.
-10. Output ONLY the Python code. No markdown fences, no explanation text before
-    or after the code.
-```
+1. The script must be fully self-contained.
+2. Include educational comments.
+3. Handle common errors gracefully.
+4. Use streaming output where applicable.
+5. Output ONLY the Python code.
+### 5.3 Hardware Parameters
 
-### 5.3 User Prompt Template
-
-```
-Generate a Python script to run the following model locally.
-
-Model ID: {model_id}
-Pipeline type: {pipeline_tag}
-Available file formats: {formats}  (e.g., "safetensors, gguf")
-Model card excerpt:
----
-{model_card_truncated_to_2000_chars}
----
-
-User hardware:
-- RAM: {total_ram_gb} GB total, {available_ram_gb} GB available
-- GPU: {gpu_name} with {vram_gb} GB VRAM (or "No GPU detected")
-- OS: {os_name}
-
-Installed packages: {comma_separated_package_list}
-
-Output directory for files: {output_temp_dir}
-
-User input placeholder: The script should accept input via a variable called
-INPUT_DATA at the top of the script. Set it to: {default_input_or_placeholder}
-```
-
+The local script generator factors in:
+- Model ID
+- Available RAM & VRAM
+- Selected Device (CPU/GPU)
 ### 5.4 Code Parsing Rules
 
-After receiving the response from Claude:
+After receiving the generated code from hf_auto_runner:
 
 1. Strip any markdown code fences (` ```python ` / ` ``` `) if present despite the instruction.
 2. Validate it's syntactically valid Python (use a basic AST parse check).
@@ -845,7 +756,6 @@ interface AppStore {
   
   // Settings
   settings: {
-    claudeApiKey: string;
     hfToken: string;
     modelStoragePath: string;
     preferredDevice: 'auto' | 'cpu' | 'cuda';
@@ -862,13 +772,13 @@ interface AppStore {
 - `settings` → persisted to local JSON config file (`{app_data}/config.json`). Loaded on app start.
 - `downloadedModels` → persisted in SQLite. Loaded on app start.
 - `browseScrollPosition` → held in memory only. Reset on app restart.
-- `generatedCode` cache → persisted in SQLite. Checked before Claude API call.
+- `generatedCode` cache → persisted in SQLite. Checked before generation.
 - Everything else → ephemeral, held in memory.
 
 ### 7.3 Data Flow Rules
 
 1. **Hugging Face API calls happen only in the Browse view and Model Detail Phase 1.** Never prefetch models the user hasn't asked for.
-2. **Claude API calls happen only when the user clicks "Generate Code" or "Regenerate."** Never generate code speculatively.
+2. **Code generation happens only when the user clicks "Generate Code" or "Regenerate."** Never generate code speculatively.
 3. **Python execution happens only when the user clicks "Run."** Never auto-execute code.
 4. **Settings are saved on field blur, not on explicit "Save" button.** Each field saves independently when focus leaves.
 
@@ -879,7 +789,6 @@ interface AppStore {
 These are non-negotiable.
 
 1. **No outbound network calls except:**
-   - `api.anthropic.com` (Claude code generation)
    - `huggingface.co` (model browsing and downloads)
    - No other domains. No CDNs for fonts (bundle them). No external analytics. No telemetry endpoints.
 
@@ -973,7 +882,7 @@ huggingbox/
 │   │   └── useSystemInfo.ts
 │   ├── services/
 │   │   ├── huggingfaceApi.ts
-│   │   ├── claudeApi.ts
+│   │   ├── hfAutoRunner.ts
 │   │   ├── pythonSidecar.ts
 │   │   └── database.ts
 │   ├── utils/
@@ -1072,7 +981,7 @@ Every view must handle these three states explicitly.
 
 - **Browse grid loading:** 6 skeleton cards (rectangular, animated shimmer, same size as real cards).
 - **Model detail loading:** Skeleton lines for title, description, metadata row.
-- **Code generating:** Spinner animation in the center of the editor area. Text below: "Generating code with Claude..."
+- **Code generating:** Spinner animation in the center of the editor area. Text below: "Generating code locally..."
 - **Package installing:** Progress text in Output Panel: "Installing {package}..."
 - **Model downloading:** Progress bar with speed and ETA in Output Panel.
 - **Code running:** Spinner in Output Panel. For streaming text, the first token replaces the spinner.

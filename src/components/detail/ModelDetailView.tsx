@@ -8,8 +8,8 @@ import {
   buildCacheIdentity,
   buildFallbackAnalysis,
   buildFallbackCode,
-  generateCodeWithClaudeStructured,
-} from '../../services/claudeApi';
+  generateCodeLocally,
+} from '../../services/hfAutoRunner';
 import {
   buildCodeCacheKey,
   readCachedCode,
@@ -94,16 +94,17 @@ export default function ModelDetailView() {
       } else {
         let code: string;
         try {
-          const generated = await generateCodeWithClaudeStructured(modelDetail, settings, systemInfo);
+          const generated = await generateCodeLocally(modelDetail, settings, systemInfo);
           code = generated.code;
           setClaudeAnalysis(generated.analysis);
           setCodeSource('generated');
-        } catch {
+        } catch (err) {
+          console.error("Local python generation failed", err);
           code = buildFallbackCode(modelDetail);
           setClaudeAnalysis(buildFallbackAnalysis(modelDetail, systemInfo));
           setCodeSource('generated');
           setCodeGenerationError(
-            'Claude API was unavailable. Loaded a local fallback template; update your API key in Settings for tailored generation.'
+            `hf_auto_runner failed to generate code. Loaded a local fallback template instead. Error: ${String(err)}`
           );
         }
 
@@ -276,7 +277,6 @@ interface WorkspaceLayoutProps {
 
 function WorkspaceLayout({ model, code, executionState, claudeAnalysis }: WorkspaceLayoutProps) {
   const [inputValue, setInputValue] = useState('');
-  const generatedCode = useAppStore((s) => s.generatedCode);
   const { runCode, cancelExecution } = useExecution();
 
   const isRunning =
@@ -299,17 +299,8 @@ function WorkspaceLayout({ model, code, executionState, claudeAnalysis }: Worksp
   else if (siblings.some((f) => f.rfilename.endsWith('.bin'))) formatLabel = 'PyTorch';
 
   function handleRun() {
-    const sourceCode = generatedCode ?? code;
-    const encodedInput = inputValue.startsWith('__HBJSON__:')
-      ? inputValue.slice('__HBJSON__:'.length)
-      : inputValue.startsWith('__HBIMG__:')
-        ? JSON.stringify(inputValue.slice('__HBIMG__:'.length))
-        : JSON.stringify(inputValue || 'Hello from HuggingBox');
-    const withInput = /(^|\n)INPUT_DATA\s*=.*(\n|$)/.test(sourceCode)
-      ? sourceCode.replace(/(^|\n)INPUT_DATA\s*=.*(\n|$)/, `$1INPUT_DATA = ${encodedInput}$2`)
-      : `INPUT_DATA = ${encodedInput}\n${sourceCode}`;
     const store = useAppStore.getState();
-    runCode(withInput, {
+    runCode({
       modelId: model.modelId ?? model.id,
       storagePath: store.settings.modelStoragePath,
       hfToken: store.settings.hfToken,

@@ -273,21 +273,7 @@ export default function SettingsView() {
           Settings
         </h1>
 
-        {/* Claude API Key */}
-        <div style={SECTION_STYLE}>
-          <h2 style={SECTION_TITLE}>Claude API</h2>
-          <Field
-            label="Anthropic API Key"
-            helper="Required for code generation. Get your key at"
-            helperLink={{ text: 'console.anthropic.com', href: 'https://console.anthropic.com' }}
-          >
-            <PasswordInput
-              value={settings.claudeApiKey}
-              onChange={(v) => updateSettings({ claudeApiKey: v })}
-              placeholder="sk-ant-..."
-            />
-          </Field>
-        </div>
+
 
         {/* Hugging Face Token */}
         <div style={SECTION_STYLE}>
