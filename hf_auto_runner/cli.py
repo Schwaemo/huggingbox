@@ -2,6 +2,8 @@ import argparse
 import sys
 from typing import Dict, Any
 import json
+import os
+import traceback
 
 from .inspector import ModelInspector
 from .runtime_router import RuntimeRouter
@@ -9,6 +11,10 @@ from .env_manager import EnvManager
 from .dependency_manager import DependencyManager
 from .script_generator import ScriptGenerator
 from .executor import Executor
+
+def _debug(message: str):
+    if os.environ.get("HB_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}:
+        print(f"[hf_auto_runner][cli] {message}", file=sys.stderr, flush=True)
 
 def main():
     parser = argparse.ArgumentParser(description="HuggingBox Auto Runner")
@@ -77,16 +83,24 @@ def run_model(model_id: str, user_input: str = "", hf_token: str = ""):
 
 def generate_model_script(model_id: str, hf_token: str = ""):
     try:
+        _debug(f"generate start model_id={model_id} token={'yes' if hf_token else 'no'}")
         inspector = ModelInspector(model_id, hf_token=hf_token or None)
         metadata = inspector.fetch_metadata()
+        _debug(
+            "metadata fetched "
+            f"files={len(metadata.get('filenames', []))} "
+            f"has_config={'yes' if bool(metadata.get('config')) else 'no'}"
+        )
         
         router = RuntimeRouter(metadata)
         architecture = router.get_architecture()
         runtime = router.get_runtime()
+        _debug(f"routing complete architecture={architecture} runtime={runtime}")
         
         # Don't instantiate venvs or deps. Just generate the raw script logic strings.
         script_gen = ScriptGenerator(model_id, metadata, runtime, architecture)
         code = script_gen.get_raw_script()
+        _debug(f"script generated chars={len(code)}")
         
         analysis = (
             f"Model {model_id} will run with a local Python script using {runtime}. "
@@ -103,8 +117,13 @@ def generate_model_script(model_id: str, hf_token: str = ""):
         print(json.dumps(result))
         
     except Exception as e:
+        tb = traceback.format_exc()
+        _debug(f"generate failed model_id={model_id} error={e}")
+        print(tb, file=sys.stderr, flush=True)
         error_result = {
-            "error": str(e)
+            "error": str(e),
+            "errorType": type(e).__name__,
+            "traceback": tb,
         }
         print(json.dumps(error_result))
         sys.exit(1)

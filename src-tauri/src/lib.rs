@@ -850,6 +850,7 @@ async fn detect_python(app: AppHandle) -> PythonInfo {
 async fn generate_python_code_local(app: AppHandle, model_id: String, hf_token: Option<String>) -> Result<String, String> {
     let python = find_python(&app).await?;
     let mut cmd = tokio::process::Command::new(&python);
+    cmd.env("HB_DEBUG", "1");
     if let Some(pypath) = hf_auto_runner_parent_dir(&app) {
         cmd.env("PYTHONPATH", pypath.to_string_lossy().to_string());
     }
@@ -872,18 +873,44 @@ async fn generate_python_code_local(app: AppHandle, model_id: String, hf_token: 
         .await
         .map_err(|e| format!("Failed to call python hf_auto_runner script logic: {}", e))?;
 
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        // It may fail but still print out valid JSON describing the failure gracefully
-        if stdout.contains("error") {
-            return Ok(stdout.to_string());
+        // It may fail but still print valid JSON; attach diagnostics when possible.
+        if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(stdout.trim()) {
+            if let Some(obj) = value.as_object_mut() {
+                if !stderr.trim().is_empty() {
+                    obj.insert("stderr".to_string(), serde_json::Value::String(stderr.clone()));
+                }
+                obj.insert(
+                    "exitCode".to_string(),
+                    serde_json::Value::String(output.status.to_string()),
+                );
+            }
+            return Ok(value.to_string());
         }
-        return Err(format!("Python hf_auto_runner failed. Code: {}\nOutput: {}", output.status, stderr));
+        return Err(format!(
+            "Python hf_auto_runner failed.\nstatus: {}\nstderr:\n{}\nstdout:\n{}",
+            output.status, stderr, stdout
+        ));
     }
-    
-    // Otherwise it passed, return JSON body
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+
+    // Validate that successful runs return valid JSON and include debug stderr context.
+    let mut value = serde_json::from_str::<serde_json::Value>(stdout.trim()).map_err(|e| {
+        format!(
+            "hf_auto_runner returned non-JSON stdout.\nparse_error: {}\nstderr:\n{}\nstdout:\n{}",
+            e, stderr, stdout
+        )
+    })?;
+
+    if let Some(obj) = value.as_object_mut() {
+        if !stderr.trim().is_empty() {
+            obj.insert("debugStderr".to_string(), serde_json::Value::String(stderr));
+        }
+    }
+
+    Ok(value.to_string())
 }
 
 #[tauri::command]
@@ -1643,6 +1670,7 @@ pub fn run() {
             list_gpus,
             bootstrap_python_environment,
             detect_python,
+            generate_python_code_local,
             run_python_code,
             cancel_execution,
             is_model_downloaded,

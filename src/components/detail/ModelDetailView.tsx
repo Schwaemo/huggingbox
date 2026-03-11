@@ -101,7 +101,7 @@ export default function ModelDetailView() {
         } catch (err) {
           console.error("Local python generation failed", err);
           code = buildFallbackCode(modelDetail);
-          setClaudeAnalysis(buildFallbackAnalysis(modelDetail, systemInfo));
+          setClaudeAnalysis(buildFallbackAnalysis(modelDetail, systemInfo, String(err)));
           setCodeSource('generated');
           setCodeGenerationError(
             `hf_auto_runner failed to generate code. Loaded a local fallback template instead. Error: ${String(err)}`
@@ -259,6 +259,7 @@ export default function ModelDetailView() {
             code={generatedCode}
             executionState={executionState}
             claudeAnalysis={claudeAnalysis}
+            codeGenerationError={codeGenerationError}
           />
         )}
       </div>
@@ -273,9 +274,16 @@ interface WorkspaceLayoutProps {
   code: string;
   executionState: string;
   claudeAnalysis: string | null;
+  codeGenerationError: string | null;
 }
 
-function WorkspaceLayout({ model, code, executionState, claudeAnalysis }: WorkspaceLayoutProps) {
+function WorkspaceLayout({
+  model,
+  code,
+  executionState,
+  claudeAnalysis,
+  codeGenerationError,
+}: WorkspaceLayoutProps) {
   const [inputValue, setInputValue] = useState('');
   const { runCode, cancelExecution } = useExecution();
 
@@ -331,6 +339,42 @@ function WorkspaceLayout({ model, code, executionState, claudeAnalysis }: Worksp
 
       {/* Right: Analysis + Code editor + Output */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        {codeGenerationError && (
+          <div
+            style={{
+              flex: '0 0 auto',
+              maxHeight: '160px',
+              overflowY: 'auto',
+              borderBottom: '1px solid var(--border)',
+              padding: 'var(--space-sm) var(--space-md)',
+              backgroundColor: 'rgba(239,68,68,0.08)',
+            }}
+          >
+            <div
+              style={{
+                fontFamily: '"JetBrains Mono", monospace',
+                fontSize: '11px',
+                color: 'var(--error)',
+                textTransform: 'uppercase',
+                letterSpacing: '0.06em',
+                marginBottom: '6px',
+              }}
+            >
+              Runner Diagnostics
+            </div>
+            <div
+              style={{
+                fontFamily: '"JetBrains Mono", monospace',
+                fontSize: '12px',
+                color: 'var(--error)',
+                lineHeight: 1.5,
+                whiteSpace: 'pre-wrap',
+              }}
+            >
+              {codeGenerationError}
+            </div>
+          </div>
+        )}
         {claudeAnalysis && (
           <div
             style={{
