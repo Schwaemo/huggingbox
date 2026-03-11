@@ -13,7 +13,7 @@ export function buildCacheIdentity(model: HFModelDetail, system: SystemInfo): st
 
 export async function generateCodeLocally(
   model: HFModelDetail,
-  _settings: AppSettings,
+  settings: AppSettings,
   _system: SystemInfo
 ): Promise<CodeGenerationResponse> {
   const modelId = model.modelId || model.id;
@@ -26,6 +26,7 @@ export async function generateCodeLocally(
   try {
     const fallbackResponse = await invoke<string>('generate_python_code_local', {
       modelId: modelId,
+      hfToken: settings.hfToken?.trim() ? settings.hfToken.trim() : null,
     });
     
     // Attempt parsing

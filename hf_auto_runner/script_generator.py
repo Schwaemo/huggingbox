@@ -107,6 +107,8 @@ import torch
 from transformers import AutoProcessor, AutoModelForImageTextToText
 from PIL import Image
 import urllib.request
+import base64
+import re
 import os
 
 model_id = "{self.model_id}"
@@ -126,11 +128,24 @@ try:
 
     # --- Input resolution ---
     user_input = os.environ.get("HB_INPUT", "").strip()
+    if user_input.startswith("__HBIMG__:"):
+        user_input = user_input[len("__HBIMG__:"):].strip()
     
     if user_input and os.path.isfile(user_input):
         # User provided a local image path
         img_path = user_input
         print(f"Using provided image: {{img_path}}")
+    elif user_input and user_input.startswith("data:image/"):
+        # User provided a data URL from the frontend image uploader
+        match = re.match(r"^data:image/([^;]+);base64,(.+)$", user_input, flags=re.DOTALL)
+        if not match:
+            raise RuntimeError("Invalid image data URL format in HB_INPUT.")
+        ext = match.group(1).lower().replace("jpeg", "jpg")
+        payload = match.group(2)
+        img_path = os.path.abspath(f"user_input_image.{{ext}}")
+        with open(img_path, "wb") as f:
+            f.write(base64.b64decode(payload))
+        print(f"Decoded image input to: {{img_path}}")
     elif user_input and (user_input.startswith("http://") or user_input.startswith("https://")):
         # User provided a URL
         img_path = "downloaded_input.jpg"
