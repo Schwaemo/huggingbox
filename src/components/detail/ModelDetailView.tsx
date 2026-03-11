@@ -347,14 +347,14 @@ function WorkspaceLayout({
               overflowY: 'auto',
               borderBottom: '1px solid var(--border)',
               padding: 'var(--space-sm) var(--space-md)',
-              backgroundColor: 'rgba(239,68,68,0.08)',
+              backgroundColor: 'rgba(16,185,129,0.12)',
             }}
           >
             <div
               style={{
                 fontFamily: '"JetBrains Mono", monospace',
                 fontSize: '11px',
-                color: 'var(--error)',
+                color: 'var(--success)',
                 textTransform: 'uppercase',
                 letterSpacing: '0.06em',
                 marginBottom: '6px',
@@ -366,7 +366,7 @@ function WorkspaceLayout({
               style={{
                 fontFamily: '"JetBrains Mono", monospace',
                 fontSize: '12px',
-                color: 'var(--error)',
+                color: 'var(--success)',
                 lineHeight: 1.5,
                 whiteSpace: 'pre-wrap',
               }}
@@ -415,7 +415,11 @@ function WorkspaceLayout({
           <CodeEditor code={code} />
         </div>
         <div style={{ flex: '1 1 auto', overflow: 'hidden' }}>
-          <OutputPanel pipelineTag={model.pipeline_tag} inputValue={inputValue} />
+          <OutputPanel
+            modelId={model.modelId ?? model.id}
+            pipelineTag={model.pipeline_tag}
+            inputValue={inputValue}
+          />
         </div>
       </div>
     </div>

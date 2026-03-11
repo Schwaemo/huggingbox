@@ -53,6 +53,15 @@ struct DonePayload {
 }
 
 #[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ShellCommandResult {
+    stdout: String,
+    stderr: String,
+    exit_code: i32,
+    cwd: String,
+}
+
+#[derive(Serialize, Clone)]
 struct DownloadStatsPayload {
     percent: f64,
     downloaded_bytes: u64,
@@ -265,6 +274,17 @@ fn model_venv_dir(app: &AppHandle, model_id: &str) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+fn model_venv_dir_from_root(root: &PathBuf, model_id: &str) -> Result<PathBuf, String> {
+    validate_model_id(model_id)?;
+    let mut dir = root.clone();
+    for segment in model_id.split('/') {
+        if !segment.trim().is_empty() {
+            dir.push(segment.trim());
+        }
+    }
+    Ok(dir)
+}
+
 fn model_venvs_root(app: &AppHandle) -> Result<PathBuf, String> {
     let data_dir = app
         .path()
@@ -286,6 +306,10 @@ fn venv_python_path(venv_dir: &PathBuf) -> PathBuf {
 
 async fn ensure_model_venv_python(app: &AppHandle, model_id: &str) -> Result<String, String> {
     let venv_dir = model_venv_dir(app, model_id)?;
+    ensure_venv_python_at_dir(app, &venv_dir).await
+}
+
+async fn ensure_venv_python_at_dir(app: &AppHandle, venv_dir: &PathBuf) -> Result<String, String> {
     let python_path = venv_python_path(&venv_dir);
 
     if python_path.exists() {
@@ -941,7 +965,8 @@ async fn run_python_code(
     let mut command = tokio::process::Command::new(&python);
     command
         .env("PYTHONIOENCODING", "utf-8")
-        .env("PYTHONUTF8", "1");
+        .env("PYTHONUTF8", "1")
+        .env("HB_DEBUG", "1");
 
     // Ensure isolated venvs can find the hf_auto_runner package
     if let Some(pypath) = hf_auto_runner_parent_dir(&app) {
@@ -1009,6 +1034,37 @@ async fn run_python_code(
             run_args.push(input.clone());
         }
     }
+
+    let input_kind = if let Some(ref input) = user_input {
+        if input.starts_with("__HBIMG__:") || input.starts_with("data:image/") {
+            "image"
+        } else if input.starts_with("http://") || input.starts_with("https://") {
+            "url"
+        } else if std::path::Path::new(input).exists() {
+            "file-path"
+        } else {
+            "text"
+        }
+    } else {
+        "none"
+    };
+
+    let _ = app.emit("execution-stdout", StreamPayload {
+        text: format!(
+            "[HuggingBox] Launching model execution\n  model: {}\n  python: {}\n  device: {}\n  input: {}\n",
+            model, python, device, input_kind
+        ),
+    });
+    if let Some(path) = env_storage_path.as_deref() {
+        if !path.trim().is_empty() {
+            let _ = app.emit("execution-stdout", StreamPayload {
+                text: format!("[HuggingBox] Environment storage path: {}\n", path),
+            });
+        }
+    }
+    let _ = app.emit("execution-stdout", StreamPayload {
+        text: format!("[HuggingBox] Runner command args: {:?}\n", run_args),
+    });
 
     let mut child = command
         .args(&run_args)
@@ -1674,6 +1730,23 @@ fn import_name_for_requirement(requirement: &str) -> String {
     }
 }
 
+fn extract_shell_marker(output: &str, marker_prefix: &str) -> (String, Option<String>) {
+    let mut cleaned = Vec::new();
+    let mut marker: Option<String> = None;
+    for line in output.lines() {
+        if let Some(rest) = line.strip_prefix(marker_prefix) {
+            marker = Some(rest.trim().to_string());
+            continue;
+        }
+        cleaned.push(line);
+    }
+    let mut joined = cleaned.join("\n");
+    if output.ends_with('\n') {
+        joined.push('\n');
+    }
+    (joined, marker)
+}
+
 fn normalize_requirement_for_install(requirement: &str) -> String {
     if requirement_name(requirement) == "transformers" {
         return HF_TRANSFORMERS_GIT_URL.to_string();
@@ -1876,6 +1949,88 @@ async fn install_packages(
 }
 
 #[tauri::command]
+async fn run_model_shell_command(
+    app: AppHandle,
+    model_id: String,
+    command: String,
+    env_storage_path: Option<String>,
+    cwd: Option<String>,
+    hf_token: Option<String>,
+) -> Result<ShellCommandResult, String> {
+    validate_model_id(&model_id)?;
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return Err("Command is empty.".to_string());
+    }
+
+    let venv_root = effective_venv_root(&app, env_storage_path.as_deref())?;
+    let venv_dir = model_venv_dir_from_root(&venv_root, &model_id)?;
+    let _ = ensure_venv_python_at_dir(&app, &venv_dir).await?;
+
+    let venv_python = venv_python_path(&venv_dir);
+    let venv_bin = venv_python
+        .parent()
+        .ok_or("Could not resolve venv scripts directory.")?
+        .to_path_buf();
+
+    let command_cwd = cwd
+        .as_deref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .filter(|p| p.exists() && p.is_dir())
+        .unwrap_or_else(|| venv_dir.clone());
+
+    let current_path = std::env::var("PATH").unwrap_or_default();
+    let sep = if cfg!(target_os = "windows") { ";" } else { ":" };
+    let path_with_venv = format!("{}{}{}", venv_bin.to_string_lossy(), sep, current_path);
+    let cwd_marker = "__HB_CWD__:";
+
+    #[cfg(target_os = "windows")]
+    let output = {
+        let script = "$cmd = $env:HB_SHELL_COMMAND; Invoke-Expression $cmd; $hbExit = $LASTEXITCODE; if ($null -eq $hbExit) { $hbExit = 0 }; Write-Output ('__HB_CWD__:' + (Get-Location).Path); exit $hbExit";
+        tokio::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", script])
+            .env("PATH", &path_with_venv)
+            .env("VIRTUAL_ENV", venv_dir.to_string_lossy().to_string())
+            .env("HB_SHELL_COMMAND", trimmed)
+            .env("HF_TOKEN", hf_token.unwrap_or_default())
+            .current_dir(&command_cwd)
+            .output()
+            .await
+            .map_err(|e| format!("Failed to execute shell command: {}", e))?
+    };
+
+    #[cfg(not(target_os = "windows"))]
+    let output = {
+        let script = r#"cmd="$HB_SHELL_COMMAND"; eval "$cmd"; hb_ec=$?; printf "__HB_CWD__:%s\n" "$PWD"; exit $hb_ec"#;
+        tokio::process::Command::new("bash")
+            .args(["-lc", script])
+            .env("PATH", &path_with_venv)
+            .env("VIRTUAL_ENV", venv_dir.to_string_lossy().to_string())
+            .env("HB_SHELL_COMMAND", trimmed)
+            .env("HF_TOKEN", hf_token.unwrap_or_default())
+            .current_dir(&command_cwd)
+            .output()
+            .await
+            .map_err(|e| format!("Failed to execute shell command: {}", e))?
+    };
+
+    let raw_stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let raw_stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let (stdout, extracted_cwd) = extract_shell_marker(&raw_stdout, cwd_marker);
+    let exit_code = output.status.code().unwrap_or(-1);
+    let resolved_cwd = extracted_cwd.unwrap_or_else(|| command_cwd.to_string_lossy().to_string());
+
+    Ok(ShellCommandResult {
+        stdout,
+        stderr: raw_stderr,
+        exit_code,
+        cwd: resolved_cwd,
+    })
+}
+
+#[tauri::command]
 fn get_cached_code(
     app: AppHandle,
     cache_key: String,
@@ -1953,6 +2108,7 @@ pub fn run() {
             detect_python,
             generate_python_code_local,
             run_python_code,
+            run_model_shell_command,
             cancel_execution,
             is_model_downloaded,
             download_model,

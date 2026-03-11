@@ -14,6 +14,9 @@ export default function StatusBar() {
   const systemInfo = useAppStore((s) => s.systemInfo);
   const executionState = useAppStore((s) => s.executionState);
   const executionElapsed = useAppStore((s) => s.executionElapsed);
+  const activeExecutionModelId = useAppStore((s) => s.activeExecutionModelId);
+  const navigateToModel = useAppStore((s) => s.navigateToModel);
+
   function getPythonStatus(): { label: string; color: string } {
     if (executionState === 'installing') {
       return { label: 'Installing packages...', color: 'var(--warning)' };
@@ -25,18 +28,17 @@ export default function StatusBar() {
   }
 
   const pythonStatus = getPythonStatus();
-
-
   const usedRam = systemInfo.totalRam - systemInfo.availableRam;
+  const isExecutionClickable = Boolean(activeExecutionModelId);
 
   function getExecutionLabel(): string {
     switch (executionState) {
       case 'running':
         return `Running... ${formatElapsed(executionElapsed)}`;
       case 'installing':
-        return 'Installing packages...';
+        return `Running... ${formatElapsed(executionElapsed)} (installing packages)`;
       case 'downloading':
-        return 'Downloading model...';
+        return `Running... ${formatElapsed(executionElapsed)} (downloading model)`;
       case 'completed':
         return `Completed (${formatElapsed(executionElapsed)})`;
       case 'error':
@@ -89,7 +91,6 @@ export default function StatusBar() {
       aria-live="polite"
       aria-label="Status bar"
     >
-      {/* RAM */}
       <span style={mono}>
         RAM:{' '}
         {systemInfo.totalRam > 0 ? (
@@ -103,7 +104,6 @@ export default function StatusBar() {
 
       {divider}
 
-      {/* GPU */}
       <span style={mono}>
         {systemInfo.gpuName
           ? `GPU: ${systemInfo.gpuName}${systemInfo.gpuVram ? ` ${systemInfo.gpuVram}GB` : ''}`
@@ -112,12 +112,32 @@ export default function StatusBar() {
 
       {divider}
 
-      {/* Execution state — center */}
-      <span style={{ ...mono, flex: 1, textAlign: 'center', color: getExecutionColor() }}>
+      <button
+        onClick={() => {
+          if (!activeExecutionModelId) return;
+          navigateToModel(activeExecutionModelId, { preserveWorkspace: true });
+        }}
+        disabled={!isExecutionClickable}
+        title={
+          isExecutionClickable
+            ? `Open execution workspace for ${activeExecutionModelId}`
+            : 'No active execution workspace'
+        }
+        style={{
+          ...mono,
+          flex: 1,
+          textAlign: 'center',
+          color: getExecutionColor(),
+          background: 'none',
+          border: 'none',
+          cursor: isExecutionClickable ? 'pointer' : 'default',
+          opacity: isExecutionClickable ? 1 : 0.85,
+          padding: 0,
+        }}
+      >
         {getExecutionLabel()}
-      </span>
+      </button>
 
-      {/* Python env status — right */}
       <span style={{ ...mono, color: pythonStatus.color }}>
         {pythonStatus.label}
       </span>

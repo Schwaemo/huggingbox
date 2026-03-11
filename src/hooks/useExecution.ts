@@ -10,6 +10,21 @@ interface ModelDependencyProbeResult {
   compatibilityError?: string | null;
 }
 
+let executionListenerUsers = 0;
+let executionListenersCleanup: (() => void) | null = null;
+let executionListenersInitPromise: Promise<void> | null = null;
+let executionTimer: ReturnType<typeof setInterval> | null = null;
+
+function timestamp(): string {
+  return new Date().toLocaleTimeString();
+}
+
+function appendLog(text: string): void {
+  useAppStore
+    .getState()
+    .appendExecutionOutput(`[HuggingBox ${timestamp()}] ${text.endsWith('\n') ? text : `${text}\n`}`);
+}
+
 function normalizeDependencyName(raw: string): string {
   const token = raw.trim().replace(/^['"`]+|['"`]+$/g, '');
   const lower = token.toLowerCase();
@@ -36,110 +51,152 @@ function hasVersionSpecifier(requirement: string): boolean {
   return /[<>=!~]/.test(requirement);
 }
 
+function modelRunOnceKey(modelId: string): string {
+  return `huggingbox:model-run-once:${modelId}`;
+}
+
+function hasModelRunOnce(modelId: string): boolean {
+  try {
+    return localStorage.getItem(modelRunOnceKey(modelId)) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function markModelRunOnce(modelId: string): void {
+  try {
+    localStorage.setItem(modelRunOnceKey(modelId), '1');
+  } catch {
+    // ignore storage failures
+  }
+}
+
+async function ensureExecutionListenersRegistered(): Promise<void> {
+  if (executionListenersCleanup) return;
+  if (executionListenersInitPromise) {
+    await executionListenersInitPromise;
+    return;
+  }
+
+  executionListenersInitPromise = (async () => {
+    const unlistens: Array<() => void> = [];
+
+    const u1 = await listen<{ text: string }>('execution-stdout', (e) => {
+      useAppStore.getState().appendExecutionOutput(e.payload.text);
+    });
+
+    const u2 = await listen<{ text: string }>('execution-stderr', (e) => {
+      useAppStore.getState().appendStderrOutput(e.payload.text);
+    });
+
+    const u3 = await listen<{ exit_code: number }>('execution-done', (e) => {
+      const state =
+        e.payload.exit_code === 0
+          ? 'completed'
+          : e.payload.exit_code === -2
+            ? 'cancelled'
+            : 'error';
+      if (executionTimer) {
+        clearInterval(executionTimer);
+        executionTimer = null;
+      }
+      useAppStore.getState().setExecutionState(state);
+      appendLog(`Execution finished with exit code ${e.payload.exit_code}.`);
+    });
+
+    const u4 = await listen<{ text: string }>('install-progress', (e) => {
+      useAppStore.getState().appendExecutionOutput(e.payload.text);
+    });
+
+    const u5 = await listen<{ text: string }>('download-progress', (e) => {
+      useAppStore.getState().appendExecutionOutput(e.payload.text);
+    });
+
+    const u6 = await listen<{
+      percent: number;
+      downloaded_bytes: number;
+      total_bytes: number;
+      speed_bps: number;
+      eta_seconds: number | null;
+      phase: string;
+      files_done: number;
+      files_total: number;
+      filename?: string;
+    }>('download-stats', (e) => {
+      useAppStore.getState().setDownloadStats({
+        percent: e.payload.percent,
+        downloadedBytes: e.payload.downloaded_bytes,
+        totalBytes: e.payload.total_bytes,
+        speedBps: e.payload.speed_bps,
+        etaSeconds: e.payload.eta_seconds,
+        phase: e.payload.phase,
+        filesDone: e.payload.files_done,
+        filesTotal: e.payload.files_total,
+        filename: e.payload.filename,
+      });
+    });
+
+    unlistens.push(u1, u2, u3, u4, u5, u6);
+    executionListenersCleanup = () => {
+      for (const fn of unlistens) fn();
+      executionListenersCleanup = null;
+      executionListenersInitPromise = null;
+    };
+  })();
+
+  await executionListenersInitPromise;
+}
+
 /**
  * Manages Python code execution via Tauri commands.
- * - Wires up Tauri event listeners for stdout/stderr/done
- * - Provides runCode() which auto-checks and installs missing packages first
+ * - Registers global listeners once
+ * - Provides runCode() which can install dependencies for first-run only
  * - Provides cancelExecution()
- * - Drives the elapsed-time timer in the store
  */
 export function useExecution() {
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // ── Event listeners ──────────────────────────────────────────────────────
-
   useEffect(() => {
-    let unlistens: (() => void)[] = [];
-    let active = true;
+    let cancelled = false;
+    executionListenerUsers += 1;
 
-    (async () => {
-      try {
-        const u1 = await listen<{ text: string }>('execution-stdout', (e) => {
-          useAppStore.getState().appendExecutionOutput(e.payload.text);
-        });
-
-        const u2 = await listen<{ text: string }>('execution-stderr', (e) => {
-          useAppStore.getState().appendStderrOutput(e.payload.text);
-        });
-
-        const u3 = await listen<{ exit_code: number }>('execution-done', (e) => {
-          stopTimer();
-          const state = e.payload.exit_code === 0
-            ? 'completed'
-            : e.payload.exit_code === -2  // custom sentinel for cancelled
-              ? 'cancelled'
-              : 'error';
-          useAppStore.getState().setExecutionState(state);
-        });
-
-        const u4 = await listen<{ text: string }>('install-progress', (e) => {
-          useAppStore.getState().appendExecutionOutput(e.payload.text);
-        });
-
-        const u5 = await listen<{ text: string }>('download-progress', (e) => {
-          useAppStore.getState().appendExecutionOutput(e.payload.text);
-        });
-
-        const u6 = await listen<{
-          percent: number;
-          downloaded_bytes: number;
-          total_bytes: number;
-          speed_bps: number;
-          eta_seconds: number | null;
-          phase: string;
-          files_done: number;
-          files_total: number;
-          filename?: string;
-        }>('download-stats', (e) => {
-          useAppStore.getState().setDownloadStats({
-            percent: e.payload.percent,
-            downloadedBytes: e.payload.downloaded_bytes,
-            totalBytes: e.payload.total_bytes,
-            speedBps: e.payload.speed_bps,
-            etaSeconds: e.payload.eta_seconds,
-            phase: e.payload.phase,
-            filesDone: e.payload.files_done,
-            filesTotal: e.payload.files_total,
-            filename: e.payload.filename,
-          });
-        });
-
-        if (active) {
-          unlistens = [u1, u2, u3, u4, u5, u6];
-        } else {
-          // Component unmounted before listeners were registered — clean up immediately
-          u1(); u2(); u3(); u4(); u5(); u6();
-        }
-      } catch {
-        // Not running inside Tauri (e.g. browser preview) — silently ignore
+    void ensureExecutionListenersRegistered().catch(() => {
+      if (!cancelled) {
+        appendLog('Warning: failed to register execution listeners.');
       }
-    })();
+    });
 
     return () => {
-      active = false;
-      unlistens.forEach((fn) => fn());
+      cancelled = true;
+      executionListenerUsers = Math.max(0, executionListenerUsers - 1);
+      if (executionListenerUsers === 0 && executionListenersCleanup) {
+        executionListenersCleanup();
+      }
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Timer ────────────────────────────────────────────────────────────────
-
   function startTimer() {
+    if (executionTimer) {
+      timerRef.current = executionTimer;
+      return;
+    }
     const start = Date.now();
     useAppStore.getState().setExecutionStartTime(start);
-    timerRef.current = setInterval(() => {
+    executionTimer = setInterval(() => {
       useAppStore.getState().setExecutionElapsed(Date.now() - start);
     }, 100);
+    timerRef.current = executionTimer;
   }
 
   function stopTimer() {
+    if (executionTimer) {
+      clearInterval(executionTimer);
+      executionTimer = null;
+    }
     if (timerRef.current) {
-      clearInterval(timerRef.current);
       timerRef.current = null;
     }
   }
-
-  // ── Run ──────────────────────────────────────────────────────────────────
 
   const runCode = useCallback(async (
     options?: {
@@ -158,14 +215,46 @@ export function useExecution() {
     store.clearStderrOutput();
     store.setExecutionError(null);
     store.setDownloadStats(null);
+    store.setExecutionState('running');
+    startTimer();
 
-    // Download model if needed before execution
+    const modelId = options?.modelId?.trim() || '';
+    if (modelId) {
+      store.setActiveExecutionModelId(modelId);
+    }
+
+    const hasRunBefore = modelId ? hasModelRunOnce(modelId) : false;
+    const allowAutoInstall = !hasRunBefore;
+    if (modelId) {
+      markModelRunOnce(modelId);
+    }
+
+    appendLog(`Run requested${modelId ? ` for ${modelId}` : ''}.`);
+    appendLog(
+      allowAutoInstall
+        ? 'Auto dependency installation is enabled for this first run.'
+        : 'Auto dependency installation is disabled for this model (manual environment mode).'
+    );
+
     if (options?.modelId && options?.storagePath) {
       try {
+        appendLog(`Checking download readiness in ${options.storagePath}`);
         const missingDownloadDeps = await invoke<string[]>('check_packages', {
           packages: ['huggingface_hub', 'hf_transfer'],
           modelId: options.modelId,
         });
+
+        if (missingDownloadDeps.length > 0 && !allowAutoInstall) {
+          stopTimer();
+          store.setExecutionState('error');
+          store.setExecutionError(
+            `Download dependencies missing (${missingDownloadDeps.join(', ')}). Auto installs are disabled after first run for this model. Install manually from the terminal panel.`
+          );
+          store.setDownloadStats(null);
+          appendLog(`Missing download dependencies with auto-install disabled: ${missingDownloadDeps.join(', ')}`);
+          return;
+        }
+
         if (missingDownloadDeps.length > 0) {
           const approveDeps = window.confirm(
             `Model downloads require ${missingDownloadDeps.join(', ')}.\n\nInstall now?`
@@ -177,14 +266,16 @@ export function useExecution() {
             return;
           }
           store.setExecutionState('installing');
-          startTimer();
+          appendLog(`Installing download dependencies: ${missingDownloadDeps.join(', ')}`);
           await invoke('install_packages', { packages: missingDownloadDeps, modelId: options.modelId });
+          appendLog('Download dependency installation complete.');
         }
 
         const downloaded = await invoke<boolean>('is_model_downloaded', {
           modelId: options.modelId,
           storagePath: options.storagePath,
         });
+
         if (!downloaded) {
           const shouldDownload = window.confirm(
             `Model files are not downloaded yet.\n\nDownload now to:\n${options.storagePath}\n\nYou can pause by clicking Stop and resume later.`
@@ -197,8 +288,7 @@ export function useExecution() {
           }
 
           store.setExecutionState('downloading');
-          startTimer();
-          store.appendExecutionOutput(`[HuggingBox] Starting model download for ${options.modelId}\n`);
+          appendLog(`Starting model download for ${options.modelId}`);
           await invoke('download_model', {
             modelId: options.modelId,
             storagePath: options.storagePath,
@@ -206,7 +296,7 @@ export function useExecution() {
           });
           const refreshed = await listDownloadedModels(options.storagePath);
           store.setDownloadedModels(refreshed);
-          store.appendExecutionOutput('[HuggingBox] Download stage complete.\n\n');
+          appendLog('Download stage complete.');
           store.setDownloadStats({
             percent: 100,
             downloadedBytes: 0,
@@ -223,6 +313,7 @@ export function useExecution() {
         store.setExecutionState('error');
         store.setExecutionError(String(err));
         store.setDownloadStats(null);
+        appendLog(`Preparation failed: ${String(err)}`);
         return;
       }
     }
@@ -233,6 +324,7 @@ export function useExecution() {
 
     if (options?.modelId) {
       try {
+        appendLog('Running dependency compatibility probe.');
         const probe = await invoke<ModelDependencyProbeResult>('probe_model_dependencies', {
           modelId: options.modelId,
           hfToken: options?.hfToken ?? null,
@@ -241,62 +333,58 @@ export function useExecution() {
         const missingFromProbe = uniqueDependencies(probe.missingPackages ?? []);
         if (missingFromProbe.length > 0) {
           packages.push(...missingFromProbe);
-          store.appendExecutionOutput(
-            `[HuggingBox] Model dependency probe detected missing packages: ${missingFromProbe.join(', ')}\n`
-          );
+          appendLog(`Model probe found missing imports: ${missingFromProbe.join(', ')}`);
         }
 
         requiredFromProbe = uniqueDependencies(probe.requiredPackages ?? []);
         if (requiredFromProbe.length > 0) {
-          store.appendExecutionOutput(
-            `[HuggingBox] Model-declared requirements discovered: ${requiredFromProbe.join(', ')}\n`
-          );
+          appendLog(`Model-declared requirements: ${requiredFromProbe.join(', ')}`);
         }
 
         if (probe.compatibilityError) {
           compatibilityWarning = probe.compatibilityError;
-          store.appendExecutionOutput(
-            `[HuggingBox] Compatibility probe warning: ${probe.compatibilityError}\n`
-          );
+          appendLog(`Compatibility warning: ${probe.compatibilityError}`);
         }
       } catch (err) {
-        store.appendExecutionOutput(
-          `[HuggingBox] Dependency probe failed (continuing): ${String(err)}\n`
-        );
+        appendLog(`Dependency probe failed (continuing): ${String(err)}`);
       }
     }
 
     if (compatibilityWarning && requiredFromProbe.length > 0) {
       const requirementsToInstall = requiredFromProbe.filter((req) => hasVersionSpecifier(req));
       if (requirementsToInstall.length > 0) {
-        const approved = window.confirm(
-          `Model compatibility warning detected.\n\nInstall model-declared versioned requirements now?\n\n${requirementsToInstall.join('\n')}`
-        );
-        if (!approved) {
-          store.setExecutionState('idle');
-          store.setExecutionError(
-            `Execution cancelled. Model requires version-specific dependencies: ${requirementsToInstall.join(', ')}`
+        if (!allowAutoInstall) {
+          appendLog(
+            `Skipping requirement alignment because auto-install is disabled: ${requirementsToInstall.join(', ')}`
           );
-          store.setDownloadStats(null);
-          return;
-        }
-        try {
-          store.setExecutionState('installing');
-          startTimer();
-          store.appendExecutionOutput(
-            `[HuggingBox] Aligning environment to model requirements: ${requirementsToInstall.join(', ')}\n`
+        } else {
+          const approved = window.confirm(
+            `Model compatibility warning detected.\n\nInstall model-declared versioned requirements now?\n\n${requirementsToInstall.join('\n')}`
           );
-          await invoke('install_packages', {
-            packages: requirementsToInstall,
-            modelId: options?.modelId ?? null,
-          });
-          store.appendExecutionOutput('[HuggingBox] Requirement alignment complete.\n\n');
-        } catch (err) {
-          stopTimer();
-          store.setExecutionState('error');
-          store.setExecutionError(`Requirement alignment failed: ${String(err)}`);
-          store.setDownloadStats(null);
-          return;
+          if (!approved) {
+            store.setExecutionState('idle');
+            store.setExecutionError(
+              `Execution cancelled. Model requires version-specific dependencies: ${requirementsToInstall.join(', ')}`
+            );
+            store.setDownloadStats(null);
+            return;
+          }
+          try {
+            store.setExecutionState('installing');
+            appendLog(`Aligning environment to model requirements: ${requirementsToInstall.join(', ')}`);
+            await invoke('install_packages', {
+              packages: requirementsToInstall,
+              modelId: options?.modelId ?? null,
+            });
+            appendLog('Requirement alignment complete.');
+          } catch (err) {
+            stopTimer();
+            store.setExecutionState('error');
+            store.setExecutionError(`Requirement alignment failed: ${String(err)}`);
+            store.setDownloadStats(null);
+            appendLog(`Requirement alignment failed: ${String(err)}`);
+            return;
+          }
         }
       }
     }
@@ -308,40 +396,46 @@ export function useExecution() {
           modelId: options?.modelId ?? null,
         }));
         if (missing.length > 0) {
-          const approved = window.confirm(
-            `Missing packages detected:\n\n${missing.join(', ')}\n\nInstall now?`
-          );
-          if (!approved) {
-            store.setExecutionState('idle');
-            store.setExecutionError(
-              `Execution cancelled. Required packages were not installed: ${missing.join(', ')}`
+          if (!allowAutoInstall) {
+            appendLog(`Skipping package install (auto disabled). Missing: ${missing.join(', ')}`);
+          } else {
+            const approved = window.confirm(
+              `Missing packages detected:\n\n${missing.join(', ')}\n\nInstall now?`
             );
-            store.setDownloadStats(null);
-            return;
+            if (!approved) {
+              store.setExecutionState('idle');
+              store.setExecutionError(
+                `Execution cancelled. Required packages were not installed: ${missing.join(', ')}`
+              );
+              store.setDownloadStats(null);
+              return;
+            }
+            store.setExecutionState('installing');
+            appendLog(`Installing missing packages: ${missing.join(', ')}`);
+            await invoke('install_packages', {
+              packages: missing,
+              modelId: options?.modelId ?? null,
+            });
+            appendLog('Package installation complete.');
           }
-          store.setExecutionState('installing');
-          startTimer();
-          store.appendExecutionOutput(
-            `[HuggingBox] Installing missing packages: ${missing.join(', ')}\n`
-          );
-          await invoke('install_packages', {
-            packages: missing,
-            modelId: options?.modelId ?? null,
-          });
-          store.appendExecutionOutput('[HuggingBox] Installation complete.\n\n');
         }
       } catch (err) {
         stopTimer();
         store.setExecutionState('error');
         store.setExecutionError(`Package installation failed: ${String(err)}`);
         store.setDownloadStats(null);
+        appendLog(`Package installation failed: ${String(err)}`);
         return;
       }
     }
 
-    // Run the code
     store.setExecutionState('running');
-    if (!timerRef.current) startTimer();
+
+    appendLog(
+      `Launching runtime with device=${options?.preferredDevice ?? 'auto'}${
+        options?.selectedGpuId ? `, gpu=${options.selectedGpuId}` : ''
+      }${options?.envStoragePath ? `, envStorage=${options.envStoragePath}` : ''}`
+    );
 
     try {
       await invoke('run_python_code', {
@@ -352,21 +446,20 @@ export function useExecution() {
         userInput: options?.userInput ?? null,
         envStoragePath: options?.envStoragePath || null,
       });
-      // Execution result arrives via 'execution-done' event — nothing to do here
     } catch (err) {
       stopTimer();
       store.setExecutionState('error');
       store.setExecutionError(String(err));
       store.setDownloadStats(null);
+      appendLog(`Failed to launch execution: ${String(err)}`);
     }
   }, []);
-
-  // ── Cancel ───────────────────────────────────────────────────────────────
 
   const cancelExecution = useCallback(async () => {
     try {
       await invoke('cancel_execution');
       await invoke('cancel_download');
+      appendLog('Cancellation requested.');
     } catch {
       // Ignore — process may have already finished
     }

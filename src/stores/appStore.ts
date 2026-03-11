@@ -84,6 +84,7 @@ interface AppStore {
   // Navigation
   currentView: 'browse' | 'model-detail' | 'my-models' | 'settings';
   selectedModelId: string | null;
+  activeExecutionModelId: string | null;
 
   // Browse
   searchQuery: string;
@@ -130,8 +131,9 @@ interface AppStore {
 
   setCurrentView: (view: AppStore['currentView']) => void;
   setSelectedModelId: (id: string | null) => void;
-  navigateToModel: (id: string) => void;
+  navigateToModel: (id: string, options?: { preserveWorkspace?: boolean }) => void;
   navigateToBrowse: () => void;
+  setActiveExecutionModelId: (id: string | null) => void;
 
   setSearchQuery: (q: string) => void;
   setPipelineFilter: (f: string | null) => void;
@@ -174,6 +176,7 @@ export const useAppStore = create<AppStore>((set) => ({
   // Navigation
   currentView: 'browse',
   selectedModelId: null,
+  activeExecutionModelId: null,
 
   // Browse
   searchQuery: '',
@@ -233,24 +236,38 @@ export const useAppStore = create<AppStore>((set) => ({
 
   setCurrentView: (view) => set({ currentView: view }),
   setSelectedModelId: (id) => set({ selectedModelId: id }),
-  navigateToModel: (id) =>
-    set({
-      selectedModelId: id,
-      currentView: 'model-detail',
-      modelDetail: null,
-      modelDetailError: null,
-      generatedCode: null,
-      codeSource: null,
-      executionState: 'idle',
-      executionOutput: '',
-      stderrOutput: '',
-      executionError: null,
-      executionStartTime: null,
-      executionElapsed: 0,
-      downloadStats: null,
+  navigateToModel: (id, options) =>
+    set((s) => {
+      if (options?.preserveWorkspace) {
+        return {
+          selectedModelId: id,
+          currentView: 'model-detail',
+        };
+      }
+
+      return {
+        selectedModelId: id,
+        currentView: 'model-detail',
+        modelDetail: null,
+        modelDetailError: null,
+        generatedCode: null,
+        codeSource: null,
+        executionState: 'idle',
+        executionOutput: '',
+        stderrOutput: '',
+        executionError: null,
+        executionStartTime: null,
+        executionElapsed: 0,
+        downloadStats: null,
+        activeExecutionModelId:
+          s.activeExecutionModelId && s.activeExecutionModelId === id
+            ? s.activeExecutionModelId
+            : null,
+      };
     }),
   navigateToBrowse: () =>
     set({ currentView: 'browse', selectedModelId: null }),
+  setActiveExecutionModelId: (id) => set({ activeExecutionModelId: id }),
 
   setSearchQuery: (q) => set({ searchQuery: q }),
   setPipelineFilter: (f) => set({ pipelineFilter: f }),

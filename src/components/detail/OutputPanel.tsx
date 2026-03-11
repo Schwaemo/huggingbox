@@ -1,22 +1,38 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { Copy, CheckCheck, ChevronDown, ChevronRight, Terminal } from 'lucide-react';
+import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../../stores/appStore';
 import { parseExecutionOutput } from '../../utils/outputParser';
 
 interface OutputPanelProps {
+  modelId: string;
   pipelineTag?: string | null;
   inputValue?: string;
 }
 
-export default function OutputPanel({ pipelineTag, inputValue = '' }: OutputPanelProps) {
+interface ShellCommandResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  cwd: string;
+}
+
+export default function OutputPanel({ modelId, pipelineTag, inputValue = '' }: OutputPanelProps) {
   const executionOutput = useAppStore((s) => s.executionOutput);
   const stderrOutput = useAppStore((s) => s.stderrOutput);
   const executionState = useAppStore((s) => s.executionState);
   const executionError = useAppStore((s) => s.executionError);
   const downloadStats = useAppStore((s) => s.downloadStats);
+  const settings = useAppStore((s) => s.settings);
+  const appendExecutionOutput = useAppStore((s) => s.appendExecutionOutput);
+  const appendStderrOutput = useAppStore((s) => s.appendStderrOutput);
 
   const [stderrOpen, setStderrOpen] = useState(true);
   const [copied, setCopied] = useState(false);
+  const [terminalInput, setTerminalInput] = useState('');
+  const [terminalBusy, setTerminalBusy] = useState(false);
+  const [terminalCwd, setTerminalCwd] = useState<string | null>(null);
+  const [hasTerminalActivity, setHasTerminalActivity] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const isRunning = executionState === 'running' || executionState === 'installing';
@@ -196,10 +212,46 @@ export default function OutputPanel({ pipelineTag, inputValue = '' }: OutputPane
     }
   }, [executionOutput]);
 
+  useEffect(() => {
+    if (!executionOutput) {
+      setHasTerminalActivity(false);
+    }
+  }, [executionOutput]);
+
   function handleCopy() {
     navigator.clipboard.writeText(executionOutput).catch(() => {});
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  }
+
+  async function handleTerminalRun() {
+    const command = terminalInput.trim();
+    if (!command || terminalBusy) return;
+
+    setTerminalBusy(true);
+    setHasTerminalActivity(true);
+    appendExecutionOutput(`\n$ ${command}\n`);
+
+    try {
+      const result = await invoke<ShellCommandResult>('run_model_shell_command', {
+        modelId,
+        command,
+        envStoragePath: settings.envStoragePath || null,
+        cwd: terminalCwd,
+        hfToken: settings.hfToken || null,
+      });
+
+      setTerminalCwd(result.cwd || terminalCwd);
+      if (result.stdout) appendExecutionOutput(result.stdout.endsWith('\n') ? result.stdout : `${result.stdout}\n`);
+      if (result.stderr) appendStderrOutput(result.stderr.endsWith('\n') ? result.stderr : `${result.stderr}\n`);
+      appendExecutionOutput(`[shell exit ${result.exitCode}] cwd=${result.cwd || terminalCwd || '<unknown>'}\n`);
+    } catch (error) {
+      appendStderrOutput(`${String(error)}\n`);
+      appendExecutionOutput('[shell exit -1]\n');
+    } finally {
+      setTerminalBusy(false);
+      setTerminalInput('');
+    }
   }
 
   return (
@@ -400,7 +452,7 @@ export default function OutputPanel({ pipelineTag, inputValue = '' }: OutputPane
             {executionError}
           </span>
         )}
-        {renderStructuredOutput() ?? executionOutput}
+        {hasTerminalActivity ? executionOutput : (renderStructuredOutput() ?? executionOutput)}
         {isRunning && (
           <span
             style={{
@@ -413,6 +465,72 @@ export default function OutputPanel({ pipelineTag, inputValue = '' }: OutputPane
             ▋
           </span>
         )}
+      </div>
+
+      <div
+        style={{
+          flexShrink: 0,
+          borderTop: '1px solid var(--border)',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px',
+          padding: '8px var(--space-md)',
+          backgroundColor: 'var(--bg-secondary)',
+        }}
+      >
+        <span
+          style={{
+            fontFamily: '"JetBrains Mono", monospace',
+            fontSize: '12px',
+            color: 'var(--text-muted)',
+          }}
+        >
+          $
+        </span>
+        <input
+          type="text"
+          value={terminalInput}
+          disabled={terminalBusy}
+          onChange={(e) => setTerminalInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              void handleTerminalRun();
+            }
+          }}
+          placeholder={`Run command in ${modelId} environment`}
+          style={{
+            flex: 1,
+            height: '28px',
+            border: '1px solid var(--border)',
+            borderRadius: '4px',
+            backgroundColor: 'var(--bg-primary)',
+            color: 'var(--text-primary)',
+            padding: '0 8px',
+            fontFamily: '"JetBrains Mono", monospace',
+            fontSize: '12px',
+            outline: 'none',
+          }}
+        />
+        <button
+          onClick={() => {
+            void handleTerminalRun();
+          }}
+          disabled={terminalBusy || !terminalInput.trim()}
+          style={{
+            height: '28px',
+            padding: '0 10px',
+            border: '1px solid var(--border)',
+            borderRadius: '4px',
+            backgroundColor: 'var(--bg-tertiary)',
+            color: terminalBusy ? 'var(--text-muted)' : 'var(--text-primary)',
+            fontFamily: '"JetBrains Mono", monospace',
+            fontSize: '12px',
+            cursor: terminalBusy ? 'default' : 'pointer',
+          }}
+        >
+          {terminalBusy ? '...' : 'Run'}
+        </button>
       </div>
 
       {/* stderr collapsible section */}
@@ -429,7 +547,7 @@ export default function OutputPanel({ pipelineTag, inputValue = '' }: OutputPane
               background: 'none',
               border: 'none',
               cursor: 'pointer',
-              color: 'var(--error)',
+              color: 'var(--success)',
               fontFamily: '"JetBrains Mono", monospace',
               fontSize: '11px',
               textTransform: 'uppercase',
@@ -448,10 +566,10 @@ export default function OutputPanel({ pipelineTag, inputValue = '' }: OutputPane
                 maxHeight: '180px',
                 overflowY: 'auto',
                 padding: 'var(--space-sm) var(--space-md)',
-                backgroundColor: 'rgba(239,68,68,0.06)',
+                backgroundColor: 'rgba(16,185,129,0.10)',
                 fontFamily: '"JetBrains Mono", monospace',
                 fontSize: '12px',
-                color: 'var(--error)',
+                color: 'var(--success)',
                 whiteSpace: 'pre-wrap',
                 wordBreak: 'break-all',
                 lineHeight: 1.5,

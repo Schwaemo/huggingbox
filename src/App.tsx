@@ -3,6 +3,7 @@ import './App.css';
 import { useAppStore } from './stores/appStore';
 import { useSystemInfo } from './hooks/useSystemInfo';
 import { loadSettingsFromFile, saveSettingsToFile } from './services/settingsStorage';
+import { useExecution } from './hooks/useExecution';
 import HeaderBar from './components/layout/HeaderBar';
 import StatusBar from './components/layout/StatusBar';
 import BrowseView from './components/browse/BrowseView';
@@ -19,6 +20,7 @@ export default function App() {
 
   // Initialise system info polling via Tauri
   useSystemInfo();
+  useExecution();
 
   // Load persisted app settings from app-data on startup
   useEffect(() => {
