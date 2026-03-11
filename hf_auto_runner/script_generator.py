@@ -110,6 +110,8 @@ import urllib.request
 import base64
 import re
 import os
+import tempfile
+import uuid
 
 model_id = "{self.model_id}"
 hf_token = os.environ.get("HF_TOKEN") or None
@@ -138,6 +140,10 @@ try:
         ).to(device)
         print("Loaded model via AutoModelForCausalLM.")
 
+    runtime_input_dir = os.path.join(tempfile.gettempdir(), "huggingbox_inputs")
+    os.makedirs(runtime_input_dir, exist_ok=True)
+    run_suffix = uuid.uuid4().hex[:8]
+
     # --- Input resolution ---
     user_input = os.environ.get("HB_INPUT", "").strip()
     if user_input.startswith("__HBIMG__:"):
@@ -154,24 +160,23 @@ try:
             raise RuntimeError("Invalid image data URL format in HB_INPUT.")
         ext = match.group(1).lower().replace("jpeg", "jpg")
         payload = match.group(2)
-        img_path = os.path.abspath(f"user_input_image.{{ext}}")
+        img_path = os.path.join(runtime_input_dir, f"user_input_{{run_suffix}}.{{ext}}")
         with open(img_path, "wb") as f:
             f.write(base64.b64decode(payload))
         print(f"Decoded image input to: {{img_path}}")
     elif user_input and (user_input.startswith("http://") or user_input.startswith("https://")):
         # User provided a URL
-        img_path = "downloaded_input.jpg"
+        img_path = os.path.join(runtime_input_dir, f"downloaded_input_{{run_suffix}}.jpg")
         print(f"Downloading user image from URL...")
         urllib.request.urlretrieve(user_input, img_path)
     else:
-        # No input — use a sample image
-        img_path = "sample_image.jpg"
+        # No input -> use a sample image
+        img_path = os.path.join(runtime_input_dir, "sample_image.jpg")
         if not os.path.exists(img_path):
-            print("No input provided — downloading sample image...")
+            print("No input provided -> downloading sample image...")
             urllib.request.urlretrieve("https://picsum.photos/id/237/500/500", img_path)
         else:
             print("Using cached sample image.")
-
     image = Image.open(img_path).convert("RGB")
     prompt = "Describe this image in detail."
     
@@ -190,9 +195,18 @@ try:
 
     print("Generating...")
     outputs = model.generate(**inputs, max_new_tokens=128)
-    
-    input_len = inputs.input_ids.shape[1]
-    generated_ids = outputs[0][input_len:] if outputs.shape[1] > input_len else outputs[0]
+
+    input_ids = None
+    if isinstance(inputs, dict):
+        input_ids = inputs.get("input_ids")
+    elif hasattr(inputs, "input_ids"):
+        input_ids = inputs.input_ids
+
+    if input_ids is not None and hasattr(input_ids, "shape") and len(input_ids.shape) > 1:
+        input_len = input_ids.shape[1]
+        generated_ids = outputs[0][input_len:] if outputs.shape[1] > input_len else outputs[0]
+    else:
+        generated_ids = outputs[0]
     text = processor.decode(generated_ids, skip_special_tokens=True)
     
     print("\\nOUTPUT:")
