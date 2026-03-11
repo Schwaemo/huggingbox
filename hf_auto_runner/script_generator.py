@@ -104,7 +104,7 @@ except Exception as e:
     def _multimodal_template(self) -> str:
         return f"""
 import torch
-from transformers import AutoProcessor, AutoModelForImageTextToText
+from transformers import AutoProcessor, AutoModelForImageTextToText, AutoModelForCausalLM
 from PIL import Image
 import urllib.request
 import base64
@@ -119,12 +119,24 @@ print(f"Loading multimodal model {{model_id}}...")
 
 try:
     processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True, token=hf_token)
-    model = AutoModelForImageTextToText.from_pretrained(
-        model_id,
-        torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-        trust_remote_code=True,
-        token=hf_token
-    ).to(device)
+    model = None
+    try:
+        model = AutoModelForImageTextToText.from_pretrained(
+            model_id,
+            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            trust_remote_code=True,
+            token=hf_token
+        ).to(device)
+        print("Loaded model via AutoModelForImageTextToText.")
+    except Exception as model_load_error:
+        print(f"AutoModelForImageTextToText failed, falling back to AutoModelForCausalLM: {{model_load_error}}")
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            trust_remote_code=True,
+            token=hf_token
+        ).to(device)
+        print("Loaded model via AutoModelForCausalLM.")
 
     # --- Input resolution ---
     user_input = os.environ.get("HB_INPUT", "").strip()
@@ -218,18 +230,43 @@ try:
     
     print(f"Prompt: {{prompt}}")
 
+    def _to_device_dict(batch):
+        if isinstance(batch, dict):
+            return {{k: v.to(device) if hasattr(v, "to") else v for k, v in batch.items()}}
+        return batch
+
+    model_inputs = None
     try:
         messages = [{{"role": "user", "content": prompt}}]
-        inputs = tokenizer.apply_chat_template(messages, return_tensors="pt", add_generation_prompt=True).to(device)
-        input_ids = inputs
-    except:
-        inputs = tokenizer(prompt, return_tensors="pt").to(device)
-        input_ids = inputs.input_ids
+        chat_batch = tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_tensors="pt",
+            return_dict=True,
+        )
+        chat_batch = _to_device_dict(chat_batch)
+        if isinstance(chat_batch, dict) and "input_ids" in chat_batch:
+            model_inputs = chat_batch
+            print("Using tokenizer chat template.")
+    except Exception as e:
+        print(f"Chat template unavailable; falling back to plain tokenization: {{e}}")
+
+    if model_inputs is None:
+        encoded = tokenizer(prompt, return_tensors="pt")
+        model_inputs = _to_device_dict(encoded)
+
+    if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
         
     print("Generating...")
-    outputs = model.generate(input_ids, max_new_tokens=128)
+    outputs = model.generate(
+        **model_inputs,
+        max_new_tokens=128,
+        pad_token_id=tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+    )
     
-    input_length = input_ids.shape[1]
+    input_length = model_inputs["input_ids"].shape[1]
     response = tokenizer.decode(outputs[0][input_length:], skip_special_tokens=True)
     
     print("\\nOUTPUT:")

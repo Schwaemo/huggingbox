@@ -4,6 +4,38 @@ import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../stores/appStore';
 import { listDownloadedModels } from '../services/modelStorage';
 
+interface ModelDependencyProbeResult {
+  missingPackages: string[];
+  requiredPackages?: string[];
+  compatibilityError?: string | null;
+}
+
+function normalizeDependencyName(raw: string): string {
+  const token = raw.trim().replace(/^['"`]+|['"`]+$/g, '');
+  const lower = token.toLowerCase();
+  if (!lower) return '';
+  if (lower === 'pil') return 'pillow';
+  if (lower === 'sklearn') return 'scikit-learn';
+  if (lower === 'cv2') return 'opencv-python';
+  return lower;
+}
+
+function uniqueDependencies(items: string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of items) {
+    const normalized = normalizeDependencyName(item);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    out.push(normalized);
+  }
+  return out;
+}
+
+function hasVersionSpecifier(requirement: string): boolean {
+  return /[<>=!~]/.test(requirement);
+}
+
 /**
  * Manages Python code execution via Tauri commands.
  * - Wires up Tauri event listeners for stdout/stderr/done
@@ -196,13 +228,85 @@ export function useExecution() {
     }
 
     const packages: string[] = [];
+    let requiredFromProbe: string[] = [];
+    let compatibilityWarning: string | null = null;
+
+    if (options?.modelId) {
+      try {
+        const probe = await invoke<ModelDependencyProbeResult>('probe_model_dependencies', {
+          modelId: options.modelId,
+          hfToken: options?.hfToken ?? null,
+        });
+
+        const missingFromProbe = uniqueDependencies(probe.missingPackages ?? []);
+        if (missingFromProbe.length > 0) {
+          packages.push(...missingFromProbe);
+          store.appendExecutionOutput(
+            `[HuggingBox] Model dependency probe detected missing packages: ${missingFromProbe.join(', ')}\n`
+          );
+        }
+
+        requiredFromProbe = uniqueDependencies(probe.requiredPackages ?? []);
+        if (requiredFromProbe.length > 0) {
+          store.appendExecutionOutput(
+            `[HuggingBox] Model-declared requirements discovered: ${requiredFromProbe.join(', ')}\n`
+          );
+        }
+
+        if (probe.compatibilityError) {
+          compatibilityWarning = probe.compatibilityError;
+          store.appendExecutionOutput(
+            `[HuggingBox] Compatibility probe warning: ${probe.compatibilityError}\n`
+          );
+        }
+      } catch (err) {
+        store.appendExecutionOutput(
+          `[HuggingBox] Dependency probe failed (continuing): ${String(err)}\n`
+        );
+      }
+    }
+
+    if (compatibilityWarning && requiredFromProbe.length > 0) {
+      const requirementsToInstall = requiredFromProbe.filter((req) => hasVersionSpecifier(req));
+      if (requirementsToInstall.length > 0) {
+        const approved = window.confirm(
+          `Model compatibility warning detected.\n\nInstall model-declared versioned requirements now?\n\n${requirementsToInstall.join('\n')}`
+        );
+        if (!approved) {
+          store.setExecutionState('idle');
+          store.setExecutionError(
+            `Execution cancelled. Model requires version-specific dependencies: ${requirementsToInstall.join(', ')}`
+          );
+          store.setDownloadStats(null);
+          return;
+        }
+        try {
+          store.setExecutionState('installing');
+          startTimer();
+          store.appendExecutionOutput(
+            `[HuggingBox] Aligning environment to model requirements: ${requirementsToInstall.join(', ')}\n`
+          );
+          await invoke('install_packages', {
+            packages: requirementsToInstall,
+            modelId: options?.modelId ?? null,
+          });
+          store.appendExecutionOutput('[HuggingBox] Requirement alignment complete.\n\n');
+        } catch (err) {
+          stopTimer();
+          store.setExecutionState('error');
+          store.setExecutionError(`Requirement alignment failed: ${String(err)}`);
+          store.setDownloadStats(null);
+          return;
+        }
+      }
+    }
 
     if (packages.length > 0) {
       try {
-        const missing = await invoke<string[]>('check_packages', {
+        const missing = uniqueDependencies(await invoke<string[]>('check_packages', {
           packages,
           modelId: options?.modelId ?? null,
-        });
+        }));
         if (missing.length > 0) {
           const approved = window.confirm(
             `Missing packages detected:\n\n${missing.join(', ')}\n\nInstall now?`

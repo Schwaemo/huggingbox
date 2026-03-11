@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use sysinfo::System;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+const HF_TRANSFORMERS_GIT_URL: &str = "git+https://github.com/huggingface/transformers.git";
 
 // ─── Managed State ────────────────────────────────────────────────────────────
 
@@ -119,7 +120,11 @@ struct GpuInfoPayload {
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ModelDependencyProbeResult {
+    #[serde(default)]
     missing_packages: Vec<String>,
+    #[serde(default)]
+    required_packages: Vec<String>,
+    #[serde(default)]
     compatibility_error: Option<String>,
 }
 
@@ -1346,8 +1351,9 @@ async fn check_packages(
     let mut missing = Vec::new();
 
     for pkg in &packages {
+        let import_target = import_name_for_requirement(pkg);
         let result = tokio::process::Command::new(&python)
-            .args(["-c", &format!("import {}", pkg)])
+            .args(["-c", &format!("import {}", import_target)])
             .output()
             .await
             .map_err(|e| e.to_string())?;
@@ -1367,10 +1373,12 @@ async fn probe_model_dependencies(
     hf_token: Option<String>,
 ) -> Result<ModelDependencyProbeResult, String> {
     let python = resolve_python(&app, Some(&model_id)).await?;
-    let script = r#"
+    let script = r##"
 import json
 import re
 import sys
+import shlex
+from huggingface_hub import HfApi, hf_hub_download
 from transformers import AutoConfig, AutoModel
 
 model_id = sys.argv[1]
@@ -1425,9 +1433,155 @@ def extract_missing_packages(text: str):
             if pkg:
                 found.add(pkg)
 
+    # Common dynamic-module failure path:
+    # ModuleNotFoundError: No module named 'einops'
+    for match in re.findall(r"No module named\s+['\"]?([A-Za-z0-9._-]+)['\"]?", text or "", flags=re.IGNORECASE):
+        root = (match or "").split(".")[0]
+        pkg = normalize_pkg(root)
+        if pkg:
+            found.add(pkg)
+
     return sorted(found)
 
+def extract_repo_requirements(model_id: str, token: str | None):
+    found = []
+    seen = set()
+    stop_words = {
+        "pip", "pip3", "python", "install", "-m", "uv", "poetry", "conda", "mamba"
+    }
+
+    def add_req(raw: str):
+        req = (raw or "").strip()
+        if not req:
+            return
+        if req.startswith("#"):
+            return
+        req = req.split("#", 1)[0].strip()
+        if not req:
+            return
+        if req.startswith("-r") or req.startswith("--"):
+            return
+        if "://" in req:
+            return
+        req = req.strip("`'\"").strip()
+        if not req:
+            return
+        if req.lower() in stop_words:
+            return
+        if req.endswith("\\"):
+            req = req[:-1].strip()
+        if not req:
+            return
+        # Validate requirement-ish tokens while preserving version specifiers.
+        if not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[^\]]+\])?(?:\s*(?:==|~=|>=|<=|!=|>|<)\s*[A-Za-z0-9*+_.-]+)?(?:\s*;[^\n]+)?",
+            req,
+        ):
+            return
+        # Keep full requirement spec (pins/ranges) for pip install.
+        if req not in seen:
+            seen.add(req)
+            found.append(req)
+
+    def parse_requirements_from_text(text: str):
+        if not text:
+            return
+
+        # Capture explicit pip install commands from docs.
+        for cmd in re.findall(
+            r"(?:^|\n)\s*(?:python\s+-m\s+)?pip(?:3)?\s+install\s+([^\n\r]+)",
+            text,
+            flags=re.IGNORECASE,
+        ):
+            try:
+                parts = shlex.split(cmd)
+            except Exception:
+                parts = re.split(r"\s+", cmd.strip())
+            for tok in parts:
+                if not tok or tok.startswith("-"):
+                    continue
+                add_req(tok)
+
+        req_with_version_pattern = r"[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[^\]]+\])?\s*(?:==|~=|>=|<=|!=|>|<)\s*[A-Za-z0-9*+_.-]+(?:\s*;[^\n]+)?"
+
+        # Parse fenced code blocks where dependency pins are often listed.
+        for block in re.findall(r"```(?:bash|sh|shell|zsh|txt|python)?\s*\n(.*?)```", text, flags=re.IGNORECASE | re.DOTALL):
+            for line in block.splitlines():
+                l = line.strip()
+                if not l or l.startswith("#"):
+                    continue
+                # Handle pip install commands explicitly so CLI flags are ignored.
+                if re.search(r"^(?:python\s+-m\s+)?pip(?:3)?\s+install\s+", l, flags=re.IGNORECASE):
+                    cmd = re.sub(r"^(?:python\s+-m\s+)?pip(?:3)?\s+install\s+", "", l, flags=re.IGNORECASE)
+                    try:
+                        parts = shlex.split(cmd)
+                    except Exception:
+                        parts = re.split(r"\s+", cmd.strip())
+                    for tok in parts:
+                        if not tok or tok.startswith("-"):
+                            continue
+                        add_req(tok)
+                    continue
+                if re.search(req_with_version_pattern, l):
+                    for token in re.findall(req_with_version_pattern, l):
+                        add_req(token)
+                elif re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[^\]]+\])?", l):
+                    add_req(l)
+
+        # Inline backticked version pins, e.g. `transformers==4.41.2`
+        for token in re.findall(
+            r"`([A-Za-z0-9][A-Za-z0-9._-]*(?:\[[^\]]+\])?\s*(?:==|~=|>=|<=|!=|>|<)\s*[A-Za-z0-9*+_.-]+(?:\s*;[^\n`]+)?)`",
+            text,
+            flags=re.IGNORECASE,
+        ):
+            add_req(token)
+
+    try:
+        api = HfApi(token=token or None)
+        files = api.list_repo_files(repo_id=model_id, repo_type="model")
+        lower_to_real = {f.lower(): f for f in files}
+        candidates = []
+        for key in [
+            "requirements.txt",
+            "requirement.txt",
+            "requirements/requirements.txt",
+            "requirements/base.txt",
+        ]:
+            if key in lower_to_real:
+                candidates.append(lower_to_real[key])
+        if not candidates:
+            for f in files:
+                lf = f.lower()
+                if lf.endswith(".txt") and "requirements" in lf:
+                    candidates.append(f)
+                    if len(candidates) >= 3:
+                        break
+
+        for filename in candidates:
+            try:
+                path = hf_hub_download(repo_id=model_id, filename=filename, token=token or None)
+                with open(path, "r", encoding="utf-8") as fh:
+                    for line in fh:
+                        add_req(line)
+            except Exception:
+                continue
+
+        # Parse README guidance for pinned versions when requirements files are absent/incomplete.
+        readme_name = lower_to_real.get("readme.md")
+        if readme_name:
+            try:
+                readme_path = hf_hub_download(repo_id=model_id, filename=readme_name, token=token or None)
+                with open(readme_path, "r", encoding="utf-8") as rh:
+                    parse_requirements_from_text(rh.read())
+            except Exception:
+                pass
+    except Exception:
+        return []
+
+    return found
+
 compatibility_error = None
+required = extract_repo_requirements(model_id, token)
 try:
     cfg = call_with_token(AutoConfig.from_pretrained, model_id, trust_remote_code=True)
     call_with_token(AutoModel.from_config, cfg, trust_remote_code=True)
@@ -1437,10 +1591,14 @@ except Exception as err:
     missing = extract_missing_packages(err_text)
     lower = err_text.lower()
     if not missing and "cannot import name" in lower and "transformers.models" in lower:
+        transformer_pins = [r for r in required if r.lower().startswith("transformers")]
+        if transformer_pins:
+            hint = f" Install model-declared requirement: {transformer_pins[0]}"
+        else:
+            hint = " Install model-declared requirements (if present) or try pinning transformers to a model-compatible version."
         compatibility_error = (
             "This model's custom code is incompatible with your installed transformers version. "
-            "Try upgrading transformers first (python -m pip install -U transformers). "
-            "If that still fails, the model likely requires a specific transformers version."
+            f"{hint}"
         )
     elif not missing and "sigalrm" in lower and "trust_remote_code" in lower:
         compatibility_error = (
@@ -1449,9 +1607,10 @@ except Exception as err:
 
 print("HB_PROBE_JSON:" + json.dumps({
     "missingPackages": missing,
+    "requiredPackages": required,
     "compatibilityError": compatibility_error,
 }), flush=True)
-"#;
+"##;
 
     let script_path = std::env::temp_dir().join("huggingbox_probe_deps.py");
     std::fs::write(&script_path, script).map_err(|e| e.to_string())?;
@@ -1481,6 +1640,7 @@ print("HB_PROBE_JSON:" + json.dumps({
     if output.status.success() {
         Ok(ModelDependencyProbeResult {
             missing_packages: vec![],
+            required_packages: vec![],
             compatibility_error: None,
         })
     } else {
@@ -1489,6 +1649,11 @@ print("HB_PROBE_JSON:" + json.dumps({
 }
 
 fn requirement_name(requirement: &str) -> String {
+    let trimmed = requirement.trim().to_lowercase();
+    if trimmed.starts_with("git+https://github.com/huggingface/transformers") {
+        return "transformers".to_string();
+    }
+
     let mut end = requirement.len();
     for (idx, ch) in requirement.char_indices() {
         if ['<', '>', '=', '!', '~', '[', ';', ' '].contains(&ch) {
@@ -1497,6 +1662,23 @@ fn requirement_name(requirement: &str) -> String {
         }
     }
     requirement[..end].trim().to_lowercase()
+}
+
+fn import_name_for_requirement(requirement: &str) -> String {
+    let name = requirement_name(requirement);
+    match name.as_str() {
+        "pillow" => "PIL".to_string(),
+        "scikit-learn" => "sklearn".to_string(),
+        "opencv-python" | "opencv-python-headless" => "cv2".to_string(),
+        _ => name.replace('-', "_"),
+    }
+}
+
+fn normalize_requirement_for_install(requirement: &str) -> String {
+    if requirement_name(requirement) == "transformers" {
+        return HF_TRANSFORMERS_GIT_URL.to_string();
+    }
+    requirement.to_string()
 }
 
 async fn run_pip_install_with_progress(
@@ -1548,13 +1730,74 @@ async fn install_packages(
     let python = resolve_python(&app, model_id.as_deref()).await?;
     let mut torch_family = Vec::new();
     let mut other_packages = Vec::new();
+    let mut flash_attn_packages = Vec::new();
+    let mut requested_torch_name = false;
+    let mut requested_torchvision_or_audio = false;
+    let mut requested_flash_attn = false;
+    let mut requested_transformers = false;
     for pkg in packages {
         let name = requirement_name(&pkg);
-        if name == "torch" || name == "torchvision" || name == "torchaudio" {
-            torch_family.push(pkg);
-        } else {
-            other_packages.push(pkg);
+        let normalized_pkg = normalize_requirement_for_install(&pkg);
+        if name == "transformers" {
+            requested_transformers = true;
         }
+        if name == "flash-attn" || name == "flash_attn" {
+            requested_flash_attn = true;
+            flash_attn_packages.push(normalized_pkg);
+            continue;
+        }
+        if name == "torch" || name == "torchvision" || name == "torchaudio" {
+            if name == "torch" {
+                requested_torch_name = true;
+            }
+            if name == "torchvision" || name == "torchaudio" {
+                requested_torchvision_or_audio = true;
+            }
+            torch_family.push(normalized_pkg);
+        } else {
+            other_packages.push(normalized_pkg);
+        }
+    }
+
+    if requested_transformers {
+        let mut dropped_conflicts: Vec<String> = Vec::new();
+        other_packages.retain(|pkg| {
+            let name = requirement_name(pkg);
+            let is_conflict = name == "tokenizers" || name == "huggingface-hub";
+            if is_conflict {
+                dropped_conflicts.push(pkg.clone());
+            }
+            !is_conflict
+        });
+
+        if !dropped_conflicts.is_empty() {
+            let _ = app.emit("install-progress", StreamPayload {
+                text: format!(
+                    "[HuggingBox] Dropping conflicting pins with HF transformers source: {}\n",
+                    dropped_conflicts.join(", ")
+                ),
+            });
+        }
+    }
+
+    // torchvision/torchaudio wheels must match the torch build.
+    // If callers request torchvision/torchaudio alone, include torch to keep versions aligned.
+    if requested_torchvision_or_audio && !requested_torch_name {
+        torch_family.insert(0, "torch".to_string());
+    }
+    // If a model pins torch (and uses flash-attn), force a torchvision reinstall
+    // in the same transaction so torch/torchvision versions stay aligned.
+    if requested_torch_name && !requested_torchvision_or_audio && requested_flash_attn {
+        torch_family.push("torchvision".to_string());
+    }
+
+    if requested_transformers {
+        let _ = app.emit("install-progress", StreamPayload {
+            text: format!(
+                "[HuggingBox] Preferring Hugging Face transformers source: {}\n",
+                HF_TRANSFORMERS_GIT_URL
+            ),
+        });
     }
 
     let has_cuda_gpu = !detect_cuda_gpus().is_empty();
@@ -1589,6 +1832,44 @@ async fn install_packages(
         let mut args = vec!["-m".to_string(), "pip".to_string(), "install".to_string()];
         args.extend(other_packages);
         run_pip_install_with_progress(&app, &python, args).await?;
+    }
+
+    if !flash_attn_packages.is_empty() {
+        if cfg!(target_os = "windows") {
+            let _ = app.emit("install-progress", StreamPayload {
+                text: "[HuggingBox] Skipping optional flash-attn on Windows (build support is limited). Continuing without it.\n".to_string(),
+            });
+        } else {
+            // Ensure common build tooling exists before attempting flash-attn.
+            let bootstrap_args = vec![
+                "-m".to_string(),
+                "pip".to_string(),
+                "install".to_string(),
+                "--upgrade".to_string(),
+                "wheel".to_string(),
+                "setuptools".to_string(),
+            ];
+            let _ = run_pip_install_with_progress(&app, &python, bootstrap_args).await;
+
+            let _ = app.emit("install-progress", StreamPayload {
+                text: "[HuggingBox] Installing flash-attn with --no-build-isolation.\n".to_string(),
+            });
+            let mut args = vec![
+                "-m".to_string(),
+                "pip".to_string(),
+                "install".to_string(),
+                "--no-build-isolation".to_string(),
+            ];
+            args.extend(flash_attn_packages);
+            if let Err(e) = run_pip_install_with_progress(&app, &python, args).await {
+                let _ = app.emit("install-progress", StreamPayload {
+                    text: format!(
+                        "[HuggingBox] Optional dependency flash-attn failed to install: {}. Continuing without it.\n",
+                        e
+                    ),
+                });
+            }
+        }
     }
 
     Ok(())

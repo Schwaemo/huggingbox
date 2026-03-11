@@ -26,12 +26,17 @@ class RuntimeRouter:
         
         if "diffusion" in model_type or "diffusion" in arch_string:
             return "diffusers"
+
+        # Prioritize multimodal/OCR families before generic CausalLM routing.
+        if (
+            "imagetexttotext" in arch_string
+            or "ocr" in arch_string
+            or model_type in ["llava", "qwen2_vl", "paligemma", "glm", "deepseek_vl_v2"]
+        ):
+            return "transformers_multimodal"
             
         if "causallm" in arch_string or model_type in ["llama", "mistral", "gemma", "qwen2", "phi"]:
             return "transformers_llm"
-            
-        if "imagetexttotext" in arch_string or "ocr" in arch_string or model_type in ["llava", "qwen2_vl", "paligemma", "glm"]:
-            return "transformers_multimodal"
             
         if "speech" in arch_string or "whisper" in model_type:
             return "transformers_audio"
