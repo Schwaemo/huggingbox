@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react';
 import { PackageOpen } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
 import Button from '../shared/Button';
-import { listDownloadedModels } from '../../services/modelStorage';
+import { confirmDialog } from '../../services/dialogs';
+import { deleteDownloadedModel, listDownloadedModels } from '../../services/modelStorage';
 
 export default function MyModelsView() {
   const downloadedModels = useAppStore((s) => s.downloadedModels);
@@ -10,6 +11,7 @@ export default function MyModelsView() {
   const setDownloadedModels = useAppStore((s) => s.setDownloadedModels);
   const storagePath = useAppStore((s) => s.settings.modelStoragePath);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [deletingModelId, setDeletingModelId] = useState<string | null>(null);
   const navigateToModel = useAppStore((s) => s.navigateToModel);
 
   useEffect(() => {
@@ -29,6 +31,33 @@ export default function MyModelsView() {
       mounted = false;
     };
   }, [setDownloadedModels, storagePath]);
+
+  async function refreshDownloadedModels() {
+    try {
+      const rows = await listDownloadedModels(storagePath);
+      setDownloadedModels(rows);
+      setLoadError(null);
+    } catch {
+      setLoadError('Could not load downloaded models from storage.');
+    }
+  }
+
+  async function handleDeleteModel(modelId: string) {
+    const confirmed = await confirmDialog(
+      `Delete downloaded model files for:\n${modelId}\n\nThis removes the local model folder from storage.`
+    );
+    if (!confirmed) return;
+
+    try {
+      setDeletingModelId(modelId);
+      await deleteDownloadedModel(modelId, storagePath);
+      await refreshDownloadedModels();
+    } catch {
+      setLoadError('Could not delete the downloaded model.');
+    } finally {
+      setDeletingModelId(null);
+    }
+  }
 
   if (downloadedModels.length === 0) {
     return (
@@ -132,7 +161,12 @@ export default function MyModelsView() {
               >
                 Run
               </Button>
-              <Button variant="danger" style={{ height: '30px', fontSize: '12px' }}>
+              <Button
+                variant="danger"
+                style={{ height: '30px', fontSize: '12px' }}
+                onClick={() => void handleDeleteModel(model.id)}
+                disabled={deletingModelId === model.id}
+              >
                 Delete
               </Button>
             </div>

@@ -129,7 +129,7 @@ struct DownloadedModelPayload {
 struct ModelEnvironmentPayload {
     model_id: String,
     python_path: String,
-    size_bytes: u64,
+    size_bytes: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -548,7 +548,12 @@ fn compute_dir_size(path: &PathBuf) -> u64 {
     total
 }
 
-fn discover_model_envs(root: &PathBuf, current: &PathBuf, acc: &mut Vec<ModelEnvironmentPayload>) {
+fn discover_model_envs(
+    root: &PathBuf,
+    current: &PathBuf,
+    acc: &mut Vec<ModelEnvironmentPayload>,
+    include_sizes: bool,
+) {
     let marker = current.join("pyvenv.cfg");
     let python = venv_python_path(current);
     if marker.exists() && python.exists() {
@@ -558,11 +563,14 @@ fn discover_model_envs(root: &PathBuf, current: &PathBuf, acc: &mut Vec<ModelEnv
                 .map(|s| s.to_string_lossy().to_string())
                 .collect::<Vec<_>>()
                 .join("/");
-            let size_bytes = compute_dir_size(current);
             acc.push(ModelEnvironmentPayload {
                 model_id,
                 python_path: python.to_string_lossy().to_string(),
-                size_bytes,
+                size_bytes: if include_sizes {
+                    Some(compute_dir_size(current))
+                } else {
+                    None
+                },
             });
         }
         return;
@@ -572,7 +580,7 @@ fn discover_model_envs(root: &PathBuf, current: &PathBuf, acc: &mut Vec<ModelEnv
         for entry in entries.flatten() {
             let p = entry.path();
             if p.is_dir() {
-                discover_model_envs(root, &p, acc);
+                discover_model_envs(root, &p, acc, include_sizes);
             }
         }
     }
@@ -1736,6 +1744,18 @@ fn list_downloaded_models(storage_path: String) -> Result<Vec<DownloadedModelPay
 }
 
 #[tauri::command]
+fn delete_downloaded_model(model_id: String, storage_path: String) -> Result<(), String> {
+    validate_model_id(&model_id)?;
+    let model_dir = model_dir_from_id(&storage_path, &model_id);
+    if !model_dir.exists() {
+        return Ok(());
+    }
+    std::fs::remove_dir_all(&model_dir)
+        .map_err(|e| format!("Failed to remove downloaded model: {}", e))?;
+    Ok(())
+}
+
+#[tauri::command]
 fn list_model_workspace_entries(
     model_id: String,
     storage_path: String,
@@ -1867,15 +1887,32 @@ fn create_model_workspace_directory(
 fn list_model_environments(
     app: AppHandle,
     env_storage_path: Option<String>,
+    include_sizes: Option<bool>,
 ) -> Result<Vec<ModelEnvironmentPayload>, String> {
     let root = effective_venv_root(&app, env_storage_path.as_deref())?;
     if !root.exists() {
         return Ok(vec![]);
     }
     let mut envs = Vec::new();
-    discover_model_envs(&root, &root, &mut envs);
+    discover_model_envs(&root, &root, &mut envs, include_sizes.unwrap_or(false));
     envs.sort_by(|a, b| a.model_id.cmp(&b.model_id));
     Ok(envs)
+}
+
+#[tauri::command]
+async fn get_model_environment_size(
+    app: AppHandle,
+    model_id: String,
+    env_storage_path: Option<String>,
+) -> Result<u64, String> {
+    let root = effective_venv_root(&app, env_storage_path.as_deref())?;
+    let dir = model_venv_dir_from_root(&root, &model_id)?;
+    if !dir.exists() {
+        return Ok(0);
+    }
+    tokio::task::spawn_blocking(move || compute_dir_size(&dir))
+        .await
+        .map_err(|e| format!("Failed to compute model environment size: {}", e))
 }
 
 #[tauri::command]
@@ -2666,6 +2703,7 @@ pub fn run() {
             download_model,
             cancel_download,
             list_downloaded_models,
+            delete_downloaded_model,
             list_model_workspace_entries,
             read_model_workspace_file,
             read_binary_file,
@@ -2673,6 +2711,7 @@ pub fn run() {
             create_model_workspace_file,
             create_model_workspace_directory,
             list_model_environments,
+            get_model_environment_size,
             delete_model_environment,
             check_packages,
             probe_model_dependencies,

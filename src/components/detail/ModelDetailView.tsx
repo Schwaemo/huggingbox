@@ -3,6 +3,7 @@ import { ArrowLeft, AlertCircle, RefreshCw } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../../stores/appStore';
 import type { HFModelDetail } from '../../stores/appStore';
+import { confirmDialog, messageDialog } from '../../services/dialogs';
 import { fetchModelDetail, estimateModelSize, formatBytes } from '../../services/huggingfaceApi';
 import { estimateRamBytes } from '../../utils/ramEstimation';
 import {
@@ -35,25 +36,22 @@ import {
 } from '../../services/modelWorkspace';
 
 export default function ModelDetailView() {
-  const {
-    selectedModelId,
-    modelDetail,
-    modelDetailLoading,
-    modelDetailError,
-    generatedCode,
-    codeGenerating,
-    executionState,
-    navigateToBrowse,
-    setModelDetail,
-    setModelDetailLoading,
-    setModelDetailError,
-    setGeneratedCode,
-    setCodeGenerating,
-    setCodeSource,
-    codeSource,
-    settings,
-    systemInfo,
-  } = useAppStore();
+  const selectedModelId = useAppStore((s) => s.selectedModelId);
+  const modelDetail = useAppStore((s) => s.modelDetail);
+  const modelDetailLoading = useAppStore((s) => s.modelDetailLoading);
+  const modelDetailError = useAppStore((s) => s.modelDetailError);
+  const generatedCode = useAppStore((s) => s.generatedCode);
+  const executionState = useAppStore((s) => s.executionState);
+  const navigateToBrowse = useAppStore((s) => s.navigateToBrowse);
+  const setModelDetail = useAppStore((s) => s.setModelDetail);
+  const setModelDetailLoading = useAppStore((s) => s.setModelDetailLoading);
+  const setModelDetailError = useAppStore((s) => s.setModelDetailError);
+  const setGeneratedCode = useAppStore((s) => s.setGeneratedCode);
+  const setCodeGenerating = useAppStore((s) => s.setCodeGenerating);
+  const setCodeSource = useAppStore((s) => s.setCodeSource);
+  const codeSource = useAppStore((s) => s.codeSource);
+  const settings = useAppStore((s) => s.settings);
+  const systemInfo = useAppStore((s) => s.systemInfo);
   const [codeGenerationError, setCodeGenerationError] = useState<string | null>(null);
   const [claudeAnalysis, setClaudeAnalysis] = useState<string | null>(null);
 
@@ -131,7 +129,7 @@ export default function ModelDetailView() {
                 `${generated.analysis}\n\nClaude-suggested dependencies are already installed in this model environment.`
               );
             } else if (settings.claudeAutoInstallDependencies) {
-              const approved = window.confirm(
+              const approved = await confirmDialog(
                 `Claude suggested these Python dependencies for ${modelId}.\n\nAlready installed dependencies were skipped.\n\nMissing dependencies:\n${missingClaudeDependencies.join('\n')}\n\nInstall the missing dependencies into this model environment now?`
               );
               if (approved) {
@@ -182,9 +180,15 @@ export default function ModelDetailView() {
     await generateCode();
   }
 
+  function handleUseModel() {
+    setCodeGenerationError(null);
+    setGeneratedCode('');
+    setCodeSource(null);
+  }
+
   async function handleRegenerateCode() {
     if (codeSource === 'edited') {
-      const proceed = window.confirm(
+      const proceed = await confirmDialog(
         "You've edited the code. Regenerating will replace your changes. Continue?"
       );
       if (!proceed) return;
@@ -217,7 +221,7 @@ export default function ModelDetailView() {
           Back to Browse
         </Button>
 
-        {modelDetail && generatedCode && (
+        {modelDetail && generatedCode !== null && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-sm)' }}>
             <span
               style={{
@@ -235,10 +239,10 @@ export default function ModelDetailView() {
             </span>
             <Button
               variant="secondary"
-              onClick={handleRegenerateCode}
+              onClick={generatedCode.trim() ? handleRegenerateCode : handleGenerateCode}
               style={{ fontSize: '12px', height: '28px', padding: '0 var(--space-md)' }}
             >
-              Re-gen
+              {generatedCode.trim() ? 'Re-gen' : 'Generate Code'}
             </Button>
           </div>
         )}
@@ -301,12 +305,11 @@ export default function ModelDetailView() {
         )}
 
         {/* Phase 1: Model info + Generate Code button */}
-        {!modelDetailLoading && !modelDetailError && modelDetail && !generatedCode && (
+        {!modelDetailLoading && !modelDetailError && modelDetail && generatedCode === null && (
           <div style={{ flex: 1, overflowY: 'auto' }}>
             <ModelInfoPanel
               model={modelDetail}
-              onGenerateCode={handleGenerateCode}
-              codeGenerating={codeGenerating}
+              onUseModel={handleUseModel}
               codeGenerationError={codeGenerationError}
             />
           </div>
@@ -345,6 +348,7 @@ function WorkspaceLayout({
   codeGenerationError,
 }: WorkspaceLayoutProps) {
   const [inputValue, setInputValue] = useState('');
+  const [runMode, setRunMode] = useState<'prepared' | 'direct'>('prepared');
   const [currentDirectory, setCurrentDirectory] = useState('');
   const [workspaceEntries, setWorkspaceEntries] = useState<ModelWorkspaceEntry[]>([]);
   const [workspaceLoading, setWorkspaceLoading] = useState(false);
@@ -354,7 +358,9 @@ function WorkspaceLayout({
   const [editorStatus, setEditorStatus] = useState('Python');
   const initialCodeRef = useRef(code);
   const skipNextAutosaveRef = useRef(true);
-  const { settings, setGeneratedCode, setCodeSource } = useAppStore();
+  const settings = useAppStore((s) => s.settings);
+  const setGeneratedCode = useAppStore((s) => s.setGeneratedCode);
+  const setCodeSource = useAppStore((s) => s.setCodeSource);
   const { runCode, cancelExecution } = useExecution();
   const modelId = useMemo(() => model.modelId ?? model.id, [model.id, model.modelId]);
 
@@ -502,10 +508,9 @@ function WorkspaceLayout({
   const handleCodeChange = useCallback(
     (nextCode: string) => {
       setEditorCode(nextCode);
-      setGeneratedCode(nextCode);
       setCodeSource('edited');
     },
-    [setCodeSource, setGeneratedCode]
+    [setCodeSource]
   );
 
   const handleOpenDirectory = useCallback(
@@ -600,7 +605,9 @@ function WorkspaceLayout({
       ['automatic-speech-recognition', 'audio-classification'].includes(model.pipeline_tag ?? '') &&
       !trimmedInput
     ) {
-      window.alert('Select an audio file before running this model.');
+      await messageDialog('Select an audio file before running this model.', {
+        kind: 'warning',
+      });
       return;
     }
 
@@ -616,6 +623,8 @@ function WorkspaceLayout({
         userInput: trimmedInput || undefined,
         envStoragePath: settings.envStoragePath || undefined,
         scriptRelativePath,
+        runtimeSourceCode: editorCode,
+        runMode,
       });
     } catch (error) {
       setEditorStatus('Save failed');
@@ -631,6 +640,8 @@ function WorkspaceLayout({
           pipelineTag={model.pipeline_tag}
           inputValue={inputValue}
           onInputChange={setInputValue}
+          runMode={runMode}
+          onRunModeChange={setRunMode}
           onRun={handleRun}
           onCancel={cancelExecution}
           isRunning={isRunning}

@@ -13,8 +13,7 @@ import { estimateRamBytes, getCompatibility } from '../../utils/ramEstimation';
 
 interface ModelInfoPanelProps {
   model: HFModelDetail;
-  onGenerateCode: () => void;
-  codeGenerating: boolean;
+  onUseModel: () => void;
   codeGenerationError?: string | null;
 }
 
@@ -29,8 +28,7 @@ const MAX_DESC = 300;
 
 export default function ModelInfoPanel({
   model,
-  onGenerateCode,
-  codeGenerating,
+  onUseModel,
   codeGenerationError,
 }: ModelInfoPanelProps) {
   const [descExpanded, setDescExpanded] = useState(false);
@@ -214,11 +212,10 @@ export default function ModelInfoPanel({
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 'var(--space-md)' }}>
         <Button
           variant="primary"
-          onClick={onGenerateCode}
-          disabled={codeGenerating}
+          onClick={onUseModel}
           style={{ minWidth: '200px', justifyContent: 'center', height: '44px', fontSize: '14px' }}
         >
-          {codeGenerating ? 'Generating...' : 'Generate Code'}
+          Use This Model
         </Button>
 
         {codeGenerationError && (

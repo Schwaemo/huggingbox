@@ -7,6 +7,8 @@ interface InputPanelProps {
   pipelineTag: string | null | undefined;
   inputValue: string;
   onInputChange: (val: string) => void;
+  runMode: 'prepared' | 'direct';
+  onRunModeChange: (mode: 'prepared' | 'direct') => void;
   onRun: () => void;
   onCancel: () => void;
   isRunning: boolean;
@@ -77,6 +79,8 @@ export default function InputPanel({
   pipelineTag,
   inputValue,
   onInputChange,
+  runMode,
+  onRunModeChange,
   onRun,
   onCancel,
   isRunning,
@@ -433,6 +437,70 @@ export default function InputPanel({
           flexShrink: 0,
         }}
       >
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '6px',
+            paddingBottom: 'var(--space-xs)',
+          }}
+        >
+          <span
+            style={{
+              fontFamily: '"JetBrains Mono", monospace',
+              fontSize: '11px',
+              color: 'var(--text-muted)',
+              textTransform: 'uppercase',
+              letterSpacing: '0.06em',
+            }}
+          >
+            Run Mode
+          </span>
+          <label
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              fontFamily: '"Inter", sans-serif',
+              fontSize: '12px',
+              color: 'var(--text-secondary)',
+              cursor: isRunning ? 'default' : 'pointer',
+              opacity: isRunning ? 0.6 : 1,
+            }}
+          >
+            <input
+              type="radio"
+              name="run-mode"
+              checked={runMode === 'prepared'}
+              onChange={() => onRunModeChange('prepared')}
+              disabled={isRunning}
+              style={{ accentColor: 'var(--accent-primary)' }}
+            />
+            Prepared Run: dependency checks and compatibility probe
+          </label>
+          <label
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              fontFamily: '"Inter", sans-serif',
+              fontSize: '12px',
+              color: 'var(--text-secondary)',
+              cursor: isRunning ? 'default' : 'pointer',
+              opacity: isRunning ? 0.6 : 1,
+            }}
+          >
+            <input
+              type="radio"
+              name="run-mode"
+              checked={runMode === 'direct'}
+              onChange={() => onRunModeChange('direct')}
+              disabled={isRunning}
+              style={{ accentColor: 'var(--accent-primary)' }}
+            />
+            Direct Run: skip app-managed dependency and probe steps
+          </label>
+        </div>
         {!isRunning ? (
           <Button
             variant="primary"

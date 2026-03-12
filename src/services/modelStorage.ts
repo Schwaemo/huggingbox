@@ -24,3 +24,10 @@ export async function listDownloadedModels(storagePath: string): Promise<Downloa
     storagePath: row.storage_path,
   }));
 }
+
+export async function deleteDownloadedModel(modelId: string, storagePath: string): Promise<void> {
+  await invoke('delete_downloaded_model', {
+    modelId,
+    storagePath,
+  });
+}

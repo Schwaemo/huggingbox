@@ -1,10 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Eye, EyeOff, ExternalLink, RefreshCw, Trash2 } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { useAppStore } from '../../stores/appStore';
+import { confirmDialog } from '../../services/dialogs';
 import { listGpus, type GpuInfo } from '../../services/gpuInfo';
 import {
   deleteModelEnvironment,
+  getModelEnvironmentSize,
   listModelEnvironments,
   type ModelEnvironment,
 } from '../../services/modelEnvironments';
@@ -148,8 +150,10 @@ function formatBytes(bytes: number): string {
 }
 
 export default function SettingsView() {
-  const { settings, updateSettings } = useAppStore();
+  const settings = useAppStore((s) => s.settings);
+  const updateSettings = useAppStore((s) => s.updateSettings);
   const [storageDraft, setStorageDraft] = useState(settings.modelStoragePath);
+  const [envStorageDraft, setEnvStorageDraft] = useState(settings.envStoragePath);
   const [pickerError, setPickerError] = useState<string | null>(null);
   const [gpuOptions, setGpuOptions] = useState<GpuInfo[]>([]);
   const [gpuLoadError, setGpuLoadError] = useState<string | null>(null);
@@ -161,6 +165,10 @@ export default function SettingsView() {
   useEffect(() => {
     setStorageDraft(settings.modelStoragePath);
   }, [settings.modelStoragePath]);
+
+  useEffect(() => {
+    setEnvStorageDraft(settings.envStoragePath);
+  }, [settings.envStoragePath]);
 
   useEffect(() => {
     let active = true;
@@ -182,22 +190,49 @@ export default function SettingsView() {
     };
   }, []);
 
-  async function refreshModelEnvs() {
+  const refreshModelEnvs = useCallback(async () => {
     try {
       setEnvLoading(true);
       setEnvError(null);
-      const rows = await listModelEnvironments(settings.envStoragePath);
+      const rows = await listModelEnvironments(settings.envStoragePath, { includeSizes: false });
       setModelEnvs(rows);
     } catch (error) {
       setEnvError(String(error));
     } finally {
       setEnvLoading(false);
     }
-  }
+  }, [settings.envStoragePath]);
 
   useEffect(() => {
     void refreshModelEnvs();
   }, [settings.envStoragePath]);
+
+  useEffect(() => {
+    const pending = modelEnvs
+      .filter((env) => env.sizeBytes === null)
+      .map((env) => env.modelId);
+    if (pending.length === 0) return undefined;
+
+    let cancelled = false;
+    void (async () => {
+      for (const modelId of pending) {
+        if (cancelled) break;
+        try {
+          const sizeBytes = await getModelEnvironmentSize(modelId, settings.envStoragePath);
+          if (cancelled) break;
+          setModelEnvs((current) =>
+            current.map((env) => (env.modelId === modelId ? { ...env, sizeBytes } : env))
+          );
+        } catch {
+          // Keep Settings page responsive; size is optional metadata.
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [modelEnvs, settings.envStoragePath]);
 
   function normalizeStoragePath(input: string): string {
     const trimmed = input.trim();
@@ -209,6 +244,11 @@ export default function SettingsView() {
     const normalized = normalizeStoragePath(value);
     updateSettings({ modelStoragePath: normalized });
     setStorageDraft(normalized);
+  }
+
+  function saveEnvStoragePath(value: string) {
+    updateSettings({ envStoragePath: value.trim() });
+    setEnvStorageDraft(value.trim());
   }
 
   async function handleChooseDirectory() {
@@ -228,7 +268,7 @@ export default function SettingsView() {
   }
 
   async function handleDeleteEnv(modelId: string) {
-    const confirmed = window.confirm(
+    const confirmed = await confirmDialog(
       `Delete the isolated Python environment for:\n${modelId}\n\nIt will be recreated on next run.`
     );
     if (!confirmed) return;
@@ -428,8 +468,9 @@ export default function SettingsView() {
           >
             <input
               type="text"
-              value={settings.envStoragePath}
-              onChange={(e) => updateSettings({ envStoragePath: e.target.value })}
+              value={envStorageDraft}
+              onChange={(e) => setEnvStorageDraft(e.target.value)}
+              onBlur={(e) => saveEnvStoragePath(e.target.value)}
               placeholder="e.g. D:\HuggingBox\envs  (blank = auto)"
               style={{
                 width: '100%',
@@ -620,7 +661,7 @@ export default function SettingsView() {
                         color: 'var(--text-muted)',
                       }}
                     >
-                      {formatBytes(env.sizeBytes)}
+                      {env.sizeBytes === null ? 'Calculating size...' : formatBytes(env.sizeBytes)}
                     </p>
                   </div>
                   <button

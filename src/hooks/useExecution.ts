@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../stores/appStore';
 import { listDownloadedModels } from '../services/modelStorage';
 import { listModelEnvironments } from '../services/modelEnvironments';
+import { confirmDialog, messageDialog } from '../services/dialogs';
 import {
   clearPreferredEnvModelId,
   getPreferredEnvModelId,
@@ -20,6 +21,9 @@ let executionListenerUsers = 0;
 let executionListenersCleanup: (() => void) | null = null;
 let executionListenersInitPromise: Promise<void> | null = null;
 let executionTimer: ReturnType<typeof setInterval> | null = null;
+let bufferedStdout = '';
+let bufferedStderr = '';
+let bufferedStreamFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
 function timestamp(): string {
   return new Date().toLocaleTimeString();
@@ -29,6 +33,50 @@ function appendLog(text: string): void {
   useAppStore
     .getState()
     .appendExecutionOutput(`[HuggingBox ${timestamp()}] ${text.endsWith('\n') ? text : `${text}\n`}`);
+}
+
+function flushBufferedStreams(): void {
+  if (bufferedStreamFlushTimer) {
+    clearTimeout(bufferedStreamFlushTimer);
+    bufferedStreamFlushTimer = null;
+  }
+
+  const store = useAppStore.getState();
+  if (bufferedStdout) {
+    store.appendExecutionOutput(bufferedStdout);
+    bufferedStdout = '';
+  }
+  if (bufferedStderr) {
+    store.appendStderrOutput(bufferedStderr);
+    bufferedStderr = '';
+  }
+}
+
+function resetBufferedStreams(): void {
+  if (bufferedStreamFlushTimer) {
+    clearTimeout(bufferedStreamFlushTimer);
+    bufferedStreamFlushTimer = null;
+  }
+  bufferedStdout = '';
+  bufferedStderr = '';
+}
+
+function scheduleBufferedStreamFlush(): void {
+  if (bufferedStreamFlushTimer) return;
+  bufferedStreamFlushTimer = setTimeout(() => {
+    bufferedStreamFlushTimer = null;
+    flushBufferedStreams();
+  }, 75);
+}
+
+function queueStdout(text: string): void {
+  bufferedStdout += text;
+  scheduleBufferedStreamFlush();
+}
+
+function queueStderr(text: string): void {
+  bufferedStderr += text;
+  scheduleBufferedStreamFlush();
 }
 
 function normalizeDependencyName(raw: string): string {
@@ -151,7 +199,7 @@ async function chooseExecutionEnvModelId(
     appendLog(`Saved shared environment not found anymore: ${preferred}`);
   }
 
-  const createNew = window.confirm(
+  const createNew = await confirmDialog(
     `No Python environment exists for this model yet:\n${modelId}\n\nCreate a new isolated environment? (Recommended)\n\nClick Cancel to use an existing environment.`
   );
   if (createNew) {
@@ -162,7 +210,9 @@ async function chooseExecutionEnvModelId(
 
   const candidates = envIds.filter((id) => id !== modelId);
   if (candidates.length === 0) {
-    window.alert('No existing environments were found. Creating a new isolated environment instead.');
+    await messageDialog('No existing environments were found. Creating a new isolated environment instead.', {
+      kind: 'info',
+    });
     setPreferredEnvModelId(modelId, modelId);
     appendLog('No reusable environments found; falling back to new isolated environment.');
     return modelId;
@@ -184,7 +234,9 @@ async function chooseExecutionEnvModelId(
     return null;
   }
   if (!candidates.includes(chosen)) {
-    window.alert(`Environment "${chosen}" was not found in the existing environment list.`);
+    await messageDialog(`Environment "${chosen}" was not found in the existing environment list.`, {
+      kind: 'warning',
+    });
     appendLog(`Invalid shared environment selected: ${chosen}`);
     return null;
   }
@@ -205,14 +257,15 @@ async function ensureExecutionListenersRegistered(): Promise<void> {
     const unlistens: Array<() => void> = [];
 
     const u1 = await listen<{ text: string }>('execution-stdout', (e) => {
-      useAppStore.getState().appendExecutionOutput(e.payload.text);
+      queueStdout(e.payload.text);
     });
 
     const u2 = await listen<{ text: string }>('execution-stderr', (e) => {
-      useAppStore.getState().appendStderrOutput(e.payload.text);
+      queueStderr(e.payload.text);
     });
 
     const u3 = await listen<{ exit_code: number }>('execution-done', (e) => {
+      flushBufferedStreams();
       const state =
         e.payload.exit_code === 0
           ? 'completed'
@@ -228,11 +281,11 @@ async function ensureExecutionListenersRegistered(): Promise<void> {
     });
 
     const u4 = await listen<{ text: string }>('install-progress', (e) => {
-      useAppStore.getState().appendExecutionOutput(e.payload.text);
+      queueStdout(e.payload.text);
     });
 
     const u5 = await listen<{ text: string }>('download-progress', (e) => {
-      useAppStore.getState().appendExecutionOutput(e.payload.text);
+      queueStdout(e.payload.text);
     });
 
     const u6 = await listen<{
@@ -307,7 +360,7 @@ export function useExecution() {
     useAppStore.getState().setExecutionStartTime(start);
     executionTimer = setInterval(() => {
       useAppStore.getState().setExecutionElapsed(Date.now() - start);
-    }, 100);
+    }, 1000);
     timerRef.current = executionTimer;
   }
 
@@ -332,9 +385,12 @@ export function useExecution() {
       userInput?: string;
       envStoragePath?: string;
       scriptRelativePath?: string;
+      runtimeSourceCode?: string;
+      runMode?: 'prepared' | 'direct';
     }
   ) => {
     const store = useAppStore.getState();
+    resetBufferedStreams();
     store.clearExecutionOutput();
     store.clearStderrOutput();
     store.setExecutionError(null);
@@ -373,12 +429,17 @@ export function useExecution() {
 
     appendLog(`Run requested${modelId ? ` for ${modelId}` : ''}.`);
     appendLog(
+      options?.runMode === 'direct'
+        ? 'Run mode: direct execution (skipping app-managed dependency and compatibility checks).'
+        : 'Run mode: prepared execution (dependency checks and compatibility probe enabled).'
+    );
+    appendLog(
       allowAutoInstall
         ? 'Auto dependency installation is enabled for this first run.'
         : 'Auto dependency installation is disabled for this model (manual environment mode).'
     );
 
-    if (options?.modelId && options?.storagePath) {
+    if (options?.runMode !== 'direct' && options?.modelId && options?.storagePath) {
       try {
         appendLog(`Checking download readiness in ${options.storagePath}`);
         const missingDownloadDeps = await invoke<string[]>('check_packages', {
@@ -399,7 +460,7 @@ export function useExecution() {
         }
 
         if (missingDownloadDeps.length > 0) {
-          const approveDeps = window.confirm(
+          const approveDeps = await confirmDialog(
             `Model downloads require ${missingDownloadDeps.join(', ')}.\n\nInstall now?`
           );
           if (!approveDeps) {
@@ -424,7 +485,7 @@ export function useExecution() {
         });
 
         if (!downloaded) {
-          const shouldDownload = window.confirm(
+          const shouldDownload = await confirmDialog(
             `Model files are not downloaded yet.\n\nDownload now to:\n${options.storagePath}\n\nYou can pause by clicking Stop and resume later.`
           );
           if (!shouldDownload) {
@@ -465,232 +526,236 @@ export function useExecution() {
       }
     }
 
-    const runtimeType = detectRuntimeTypeFromCode(store.generatedCode);
-    const runtimePackages = uniqueDependencies(runtimeDependenciesForType(runtimeType));
-    if (runtimePackages.length > 0) {
-      appendLog(`Detected runtime type: ${runtimeType}`);
-      appendLog(`Checking runtime dependencies before probe: ${runtimePackages.join(', ')}`);
-      try {
-        const missingRuntime = uniqueDependencies(await invoke<string[]>('check_packages', {
-          packages: runtimePackages,
-          modelId: options?.modelId ?? null,
-          venvModelId: executionEnvModelId,
-        }));
-        if (missingRuntime.length > 0) {
-          if (!allowAutoInstall) {
-            stopTimer();
-            store.setExecutionState('error');
-            store.setExecutionError(
-              `Runtime dependencies missing (${missingRuntime.join(', ')}). Auto installs are disabled after first run for this model. Install manually from the terminal panel.`
-            );
-            store.setDownloadStats(null);
-            appendLog(`Missing runtime dependencies with auto-install disabled: ${missingRuntime.join(', ')}`);
-            return;
-          }
-
-          const approved = window.confirm(
-            `Runtime dependencies are required before dependency probing:\n\n${missingRuntime.join(', ')}\n\nInstall now?`
-          );
-          if (!approved) {
-            stopTimer();
-            store.setExecutionState('idle');
-            store.setExecutionError(
-              `Execution cancelled. Runtime dependencies were not installed: ${missingRuntime.join(', ')}`
-            );
-            store.setDownloadStats(null);
-            return;
-          }
-
-          store.setExecutionState('installing');
-          appendLog(`Installing runtime dependencies before probe: ${missingRuntime.join(', ')}`);
-          await invoke('install_packages', {
-            packages: missingRuntime,
+    if (options?.runMode !== 'direct') {
+      const runtimeType = detectRuntimeTypeFromCode(options?.runtimeSourceCode ?? store.generatedCode);
+      const runtimePackages = uniqueDependencies(runtimeDependenciesForType(runtimeType));
+      if (runtimePackages.length > 0) {
+        appendLog(`Detected runtime type: ${runtimeType}`);
+        appendLog(`Checking runtime dependencies before probe: ${runtimePackages.join(', ')}`);
+        try {
+          const missingRuntime = uniqueDependencies(await invoke<string[]>('check_packages', {
+            packages: runtimePackages,
             modelId: options?.modelId ?? null,
             venvModelId: executionEnvModelId,
-          });
-          appendLog('Runtime dependency installation complete.');
-        }
-      } catch (err) {
-        stopTimer();
-        store.setExecutionState('error');
-        store.setExecutionError(`Runtime dependency installation failed: ${String(err)}`);
-        store.setDownloadStats(null);
-        appendLog(`Runtime dependency installation failed: ${String(err)}`);
-        return;
-      }
-    }
+          }));
+          if (missingRuntime.length > 0) {
+            if (!allowAutoInstall) {
+              stopTimer();
+              store.setExecutionState('error');
+              store.setExecutionError(
+                `Runtime dependencies missing (${missingRuntime.join(', ')}). Auto installs are disabled after first run for this model. Install manually from the terminal panel.`
+              );
+              store.setDownloadStats(null);
+              appendLog(`Missing runtime dependencies with auto-install disabled: ${missingRuntime.join(', ')}`);
+              return;
+            }
 
-    const packages: string[] = [];
-    let requiredFromProbe: string[] = [];
-    let compatibilityWarning: string | null = null;
+            const approved = await confirmDialog(
+              `Runtime dependencies are required before dependency probing:\n\n${missingRuntime.join(', ')}\n\nInstall now?`
+            );
+            if (!approved) {
+              stopTimer();
+              store.setExecutionState('idle');
+              store.setExecutionError(
+                `Execution cancelled. Runtime dependencies were not installed: ${missingRuntime.join(', ')}`
+              );
+              store.setDownloadStats(null);
+              return;
+            }
 
-    if (options?.modelId) {
-      try {
-        appendLog('Running dependency compatibility probe.');
-        const probe = await invoke<ModelDependencyProbeResult>('probe_model_dependencies', {
-          modelId: options.modelId,
-          hfToken: options?.hfToken ?? null,
-          venvModelId: executionEnvModelId,
-        });
-
-        const missingFromProbe = uniqueDependencies(probe.missingPackages ?? []);
-        if (missingFromProbe.length > 0) {
-          packages.push(...missingFromProbe);
-          appendLog(`Model probe found missing imports: ${missingFromProbe.join(', ')}`);
-        }
-
-        requiredFromProbe = uniqueRequirementSpecs(probe.requiredPackages ?? []);
-        if (requiredFromProbe.length > 0) {
-          appendLog(`Model-declared requirements: ${requiredFromProbe.join(', ')}`);
-        }
-
-        if (probe.compatibilityError) {
-          compatibilityWarning = probe.compatibilityError;
-          appendLog(`Compatibility warning: ${probe.compatibilityError}`);
-        }
-      } catch (err) {
-        const probeError = String(err);
-        if (/No module named ['"]?transformers['"]?/i.test(probeError)) {
+            store.setExecutionState('installing');
+            appendLog(`Installing runtime dependencies before probe: ${missingRuntime.join(', ')}`);
+            await invoke('install_packages', {
+              packages: missingRuntime,
+              modelId: options?.modelId ?? null,
+              venvModelId: executionEnvModelId,
+            });
+            appendLog('Runtime dependency installation complete.');
+          }
+        } catch (err) {
           stopTimer();
           store.setExecutionState('error');
-          store.setExecutionError(
-            'Dependency probe failed because transformers is missing from the selected environment.'
-          );
+          store.setExecutionError(`Runtime dependency installation failed: ${String(err)}`);
           store.setDownloadStats(null);
-          appendLog(`Dependency probe failed due to missing transformers: ${probeError}`);
+          appendLog(`Runtime dependency installation failed: ${String(err)}`);
           return;
         }
-        appendLog(`Dependency probe failed (continuing): ${probeError}`);
       }
-    }
 
-    if (compatibilityWarning && requiredFromProbe.length > 0) {
-      const requirementsToInstall = requiredFromProbe.filter((req) => hasVersionSpecifier(req));
-      if (requirementsToInstall.length > 0) {
-        if (!allowAutoInstall) {
-          appendLog(
-            `Skipping requirement alignment because auto-install is disabled: ${requirementsToInstall.join(', ')}`
-          );
-        } else {
-          const approved = window.confirm(
-            `Model compatibility warning detected.\n\nInstall model-declared versioned requirements now?\n\n${requirementsToInstall.join('\n')}`
-          );
-          if (!approved) {
-            store.setExecutionState('idle');
-            store.setExecutionError(
-              `Execution cancelled. Model requires version-specific dependencies: ${requirementsToInstall.join(', ')}`
-            );
-            store.setDownloadStats(null);
-            return;
+      const packages: string[] = [];
+      let requiredFromProbe: string[] = [];
+      let compatibilityWarning: string | null = null;
+
+      if (options?.modelId) {
+        try {
+          appendLog('Running dependency compatibility probe.');
+          const probe = await invoke<ModelDependencyProbeResult>('probe_model_dependencies', {
+            modelId: options.modelId,
+            hfToken: options?.hfToken ?? null,
+            venvModelId: executionEnvModelId,
+          });
+
+          const missingFromProbe = uniqueDependencies(probe.missingPackages ?? []);
+          if (missingFromProbe.length > 0) {
+            packages.push(...missingFromProbe);
+            appendLog(`Model probe found missing imports: ${missingFromProbe.join(', ')}`);
           }
-          try {
-            store.setExecutionState('installing');
-            appendLog(`Aligning environment to model requirements: ${requirementsToInstall.join(', ')}`);
-            await invoke('install_packages', {
-              packages: requirementsToInstall,
-              modelId: options?.modelId ?? null,
-              venvModelId: executionEnvModelId,
-            });
-            appendLog('Requirement alignment complete.');
-          } catch (err) {
+
+          requiredFromProbe = uniqueRequirementSpecs(probe.requiredPackages ?? []);
+          if (requiredFromProbe.length > 0) {
+            appendLog(`Model-declared requirements: ${requiredFromProbe.join(', ')}`);
+          }
+
+          if (probe.compatibilityError) {
+            compatibilityWarning = probe.compatibilityError;
+            appendLog(`Compatibility warning: ${probe.compatibilityError}`);
+          }
+        } catch (err) {
+          const probeError = String(err);
+          if (/No module named ['"]?transformers['"]?/i.test(probeError)) {
             stopTimer();
             store.setExecutionState('error');
-            store.setExecutionError(`Requirement alignment failed: ${String(err)}`);
+            store.setExecutionError(
+              'Dependency probe failed because transformers is missing from the selected environment.'
+            );
             store.setDownloadStats(null);
-            appendLog(`Requirement alignment failed: ${String(err)}`);
+            appendLog(`Dependency probe failed due to missing transformers: ${probeError}`);
             return;
           }
+          appendLog(`Dependency probe failed (continuing): ${probeError}`);
         }
       }
-    }
 
-    if (requiredFromProbe.length > 0) {
-      try {
-        const missingRequiredNames = uniqueDependencies(await invoke<string[]>('check_packages', {
-          packages: uniqueDependencies(requiredFromProbe.map(requirementPackageName)),
-          modelId: options?.modelId ?? null,
-          venvModelId: executionEnvModelId,
-        }));
-        const missingRequiredSpecs = filterRequirementSpecsByMissing(requiredFromProbe, missingRequiredNames);
-
-        if (missingRequiredSpecs.length > 0) {
+      if (compatibilityWarning && requiredFromProbe.length > 0) {
+        const requirementsToInstall = requiredFromProbe.filter((req) => hasVersionSpecifier(req));
+        if (requirementsToInstall.length > 0) {
           if (!allowAutoInstall) {
             appendLog(
-              `Skipping model-declared requirement install because auto-install is disabled: ${missingRequiredSpecs.join(', ')}`
+              `Skipping requirement alignment because auto-install is disabled: ${requirementsToInstall.join(', ')}`
             );
           } else {
-            const approved = window.confirm(
-              `Model-declared Python requirements were found:\n\n${missingRequiredSpecs.join('\n')}\n\nInstall now?`
+            const approved = await confirmDialog(
+              `Model compatibility warning detected.\n\nInstall model-declared versioned requirements now?\n\n${requirementsToInstall.join('\n')}`
             );
-            if (!approved) {
-              store.setExecutionState('idle');
-              store.setExecutionError(
-                `Execution cancelled. Model-declared requirements were not installed: ${missingRequiredSpecs.join(', ')}`
-              );
+              if (!approved) {
+                store.setExecutionState('idle');
+                store.setExecutionError(
+                  `Execution cancelled. Model requires version-specific dependencies: ${requirementsToInstall.join(', ')}`
+                );
+                store.setDownloadStats(null);
+                return;
+              }
+            try {
+              store.setExecutionState('installing');
+              appendLog(`Aligning environment to model requirements: ${requirementsToInstall.join(', ')}`);
+              await invoke('install_packages', {
+                packages: requirementsToInstall,
+                modelId: options?.modelId ?? null,
+                venvModelId: executionEnvModelId,
+              });
+              appendLog('Requirement alignment complete.');
+            } catch (err) {
+              stopTimer();
+              store.setExecutionState('error');
+              store.setExecutionError(`Requirement alignment failed: ${String(err)}`);
               store.setDownloadStats(null);
+              appendLog(`Requirement alignment failed: ${String(err)}`);
               return;
             }
-
-            store.setExecutionState('installing');
-            appendLog(`Installing model-declared requirements: ${missingRequiredSpecs.join(', ')}`);
-            await invoke('install_packages', {
-              packages: missingRequiredSpecs,
-              modelId: options?.modelId ?? null,
-              venvModelId: executionEnvModelId,
-            });
-            appendLog('Model-declared requirement installation complete.');
           }
         }
-      } catch (err) {
-        stopTimer();
-        store.setExecutionState('error');
-        store.setExecutionError(`Model-declared requirement installation failed: ${String(err)}`);
-        store.setDownloadStats(null);
-        appendLog(`Model-declared requirement installation failed: ${String(err)}`);
-        return;
       }
-    }
 
-    if (packages.length > 0) {
-      try {
-        const missing = uniqueDependencies(await invoke<string[]>('check_packages', {
-          packages,
-          modelId: options?.modelId ?? null,
-          venvModelId: executionEnvModelId,
-        }));
-        if (missing.length > 0) {
-          if (!allowAutoInstall) {
-            appendLog(`Skipping package install (auto disabled). Missing: ${missing.join(', ')}`);
-          } else {
-            const approved = window.confirm(
-              `Missing packages detected:\n\n${missing.join(', ')}\n\nInstall now?`
-            );
-            if (!approved) {
-              store.setExecutionState('idle');
-              store.setExecutionError(
-                `Execution cancelled. Required packages were not installed: ${missing.join(', ')}`
+      if (requiredFromProbe.length > 0) {
+        try {
+          const missingRequiredNames = uniqueDependencies(await invoke<string[]>('check_packages', {
+            packages: uniqueDependencies(requiredFromProbe.map(requirementPackageName)),
+            modelId: options?.modelId ?? null,
+            venvModelId: executionEnvModelId,
+          }));
+          const missingRequiredSpecs = filterRequirementSpecsByMissing(requiredFromProbe, missingRequiredNames);
+
+          if (missingRequiredSpecs.length > 0) {
+            if (!allowAutoInstall) {
+              appendLog(
+                `Skipping model-declared requirement install because auto-install is disabled: ${missingRequiredSpecs.join(', ')}`
               );
-              store.setDownloadStats(null);
-              return;
+            } else {
+              const approved = await confirmDialog(
+                `Model-declared Python requirements were found:\n\n${missingRequiredSpecs.join('\n')}\n\nInstall now?`
+              );
+              if (!approved) {
+                store.setExecutionState('idle');
+                store.setExecutionError(
+                  `Execution cancelled. Model-declared requirements were not installed: ${missingRequiredSpecs.join(', ')}`
+                );
+                store.setDownloadStats(null);
+                return;
+              }
+
+              store.setExecutionState('installing');
+              appendLog(`Installing model-declared requirements: ${missingRequiredSpecs.join(', ')}`);
+              await invoke('install_packages', {
+                packages: missingRequiredSpecs,
+                modelId: options?.modelId ?? null,
+                venvModelId: executionEnvModelId,
+              });
+              appendLog('Model-declared requirement installation complete.');
             }
-            store.setExecutionState('installing');
-            appendLog(`Installing missing packages: ${missing.join(', ')}`);
-            await invoke('install_packages', {
-              packages: missing,
-              modelId: options?.modelId ?? null,
-              venvModelId: executionEnvModelId,
-            });
-            appendLog('Package installation complete.');
           }
+        } catch (err) {
+          stopTimer();
+          store.setExecutionState('error');
+          store.setExecutionError(`Model-declared requirement installation failed: ${String(err)}`);
+          store.setDownloadStats(null);
+          appendLog(`Model-declared requirement installation failed: ${String(err)}`);
+          return;
         }
-      } catch (err) {
-        stopTimer();
-        store.setExecutionState('error');
-        store.setExecutionError(`Package installation failed: ${String(err)}`);
-        store.setDownloadStats(null);
-        appendLog(`Package installation failed: ${String(err)}`);
-        return;
       }
+
+      if (packages.length > 0) {
+        try {
+          const missing = uniqueDependencies(await invoke<string[]>('check_packages', {
+            packages,
+            modelId: options?.modelId ?? null,
+            venvModelId: executionEnvModelId,
+          }));
+          if (missing.length > 0) {
+            if (!allowAutoInstall) {
+              appendLog(`Skipping package install (auto disabled). Missing: ${missing.join(', ')}`);
+            } else {
+              const approved = await confirmDialog(
+                `Missing packages detected:\n\n${missing.join(', ')}\n\nInstall now?`
+              );
+              if (!approved) {
+                store.setExecutionState('idle');
+                store.setExecutionError(
+                  `Execution cancelled. Required packages were not installed: ${missing.join(', ')}`
+                );
+                store.setDownloadStats(null);
+                return;
+              }
+              store.setExecutionState('installing');
+              appendLog(`Installing missing packages: ${missing.join(', ')}`);
+              await invoke('install_packages', {
+                packages: missing,
+                modelId: options?.modelId ?? null,
+                venvModelId: executionEnvModelId,
+              });
+              appendLog('Package installation complete.');
+            }
+          }
+        } catch (err) {
+          stopTimer();
+          store.setExecutionState('error');
+          store.setExecutionError(`Package installation failed: ${String(err)}`);
+          store.setDownloadStats(null);
+          appendLog(`Package installation failed: ${String(err)}`);
+          return;
+        }
+      }
+    } else {
+      appendLog('Skipping runtime dependency installation and compatibility probe.');
     }
 
     store.setExecutionState('running');
@@ -734,6 +799,7 @@ export function useExecution() {
       // Ignore — process may have already finished
     }
     stopTimer();
+    flushBufferedStreams();
     useAppStore.getState().setExecutionState('cancelled');
     useAppStore.getState().setDownloadStats(null);
   }, []);
