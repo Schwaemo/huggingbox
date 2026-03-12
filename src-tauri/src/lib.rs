@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::process::Stdio;
 use std::path::PathBuf;
 use rusqlite::{params, Connection};
@@ -82,6 +83,14 @@ struct DownloadJsonLine {
     speed_bps: f64,
     eta_seconds: Option<f64>,
     phase: String,
+    files_done: usize,
+    files_total: usize,
+    filename: Option<String>,
+}
+
+#[derive(Clone, Default)]
+struct DownloadTelemetrySnapshot {
+    total_bytes: u64,
     files_done: usize,
     files_total: usize,
     filename: Option<String>,
@@ -263,6 +272,63 @@ fn hf_auto_runner_parent_dir(app: &AppHandle) -> Option<PathBuf> {
         if cwd.join("hf_auto_runner").is_dir() {
             return Some(cwd);
         }
+    }
+
+    None
+}
+
+fn ffmpeg_binary_name() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "ffmpeg.exe"
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        "ffmpeg"
+    }
+}
+
+fn resolve_ffmpeg_path(app: &AppHandle) -> Option<String> {
+    let binary = ffmpeg_binary_name();
+
+    if let Ok(res_dir) = app.path().resource_dir() {
+        let candidate = res_dir.join("bin").join(binary);
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().to_string());
+        }
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        let mut dir = exe.as_path();
+        for _ in 0..8 {
+            if let Some(parent) = dir.parent() {
+                let candidate = parent.join("src-tauri").join("bin").join(binary);
+                if candidate.is_file() {
+                    return Some(candidate.to_string_lossy().to_string());
+                }
+                dir = parent;
+            } else {
+                break;
+            }
+        }
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        let candidate = cwd.join("src-tauri").join("bin").join(binary);
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().to_string());
+        }
+    }
+
+    if std::process::Command::new(binary)
+        .arg("-version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        return Some(binary.to_string());
     }
 
     None
@@ -1007,6 +1073,8 @@ async fn run_python_code(
     hf_token: Option<String>,
     user_input: Option<String>,
     env_storage_path: Option<String>,
+    storage_path: Option<String>,
+    script_relative_path: Option<String>,
 ) -> Result<(), String> {
     {
         let lock = handle.execution_pid.lock().unwrap();
@@ -1030,7 +1098,8 @@ async fn run_python_code(
     command
         .env("PYTHONIOENCODING", "utf-8")
         .env("PYTHONUTF8", "1")
-        .env("HB_DEBUG", "1");
+        .env("HB_DEBUG", "1")
+        .env("HB_SKIP_DEP_INSTALL", "1");
 
     // Ensure isolated venvs can find the hf_auto_runner package
     if let Some(pypath) = hf_auto_runner_parent_dir(&app) {
@@ -1067,6 +1136,11 @@ async fn run_python_code(
         }
     }
 
+    let ffmpeg_path = resolve_ffmpeg_path(&app);
+    if let Some(ref path) = ffmpeg_path {
+        command.env("HB_FFMPEG_PATH", path);
+    }
+
     let device = preferred_device.unwrap_or_else(|| "auto".to_string()).to_lowercase();
     if device == "cpu" {
         command.env("CUDA_VISIBLE_DEVICES", "-1");
@@ -1082,22 +1156,53 @@ async fn run_python_code(
         return Err("Model ID is required for execution via hf_auto_runner.".to_string());
     }
 
-    // Build CLI args: -m hf_auto_runner run <model> [--hf-token T] [--input I]
-    let mut run_args = vec![
-        "-m".to_string(), "hf_auto_runner".to_string(), "run".to_string(), model.clone()
-    ];
-    if let Some(ref token) = hf_token {
-        if !token.is_empty() {
-            run_args.push("--hf-token".to_string());
-            run_args.push(token.clone());
+    let trimmed_script_relative = script_relative_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    let workspace_root = if trimmed_script_relative.is_some() {
+        let storage = storage_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or("Storage path is required when running a workspace file.")?;
+        Some(resolve_model_workspace_root(&model, storage)?)
+    } else {
+        None
+    };
+
+    let run_target_path = if let (Some(root), Some(relative)) = (&workspace_root, &trimmed_script_relative) {
+        let path = resolve_model_workspace_path(root, relative)?;
+        if !path.exists() || !path.is_file() {
+            return Err(format!("Workspace script does not exist: {}", relative));
         }
-    }
-    if let Some(ref input) = user_input {
-        if !input.is_empty() {
-            run_args.push("--input".to_string());
-            run_args.push(input.clone());
+        Some(path)
+    } else {
+        None
+    };
+
+    let run_args = if let Some(script_path) = &run_target_path {
+        vec![script_path.to_string_lossy().to_string()]
+    } else {
+        let mut args = vec![
+            "-m".to_string(), "hf_auto_runner".to_string(), "run".to_string(), model.clone()
+        ];
+        if let Some(ref token) = hf_token {
+            if !token.is_empty() {
+                args.push("--hf-token".to_string());
+                args.push(token.clone());
+            }
         }
-    }
+        if let Some(ref input) = user_input {
+            if !input.is_empty() {
+                args.push("--input".to_string());
+                args.push(input.clone());
+            }
+        }
+        args
+    };
 
     let input_kind = if let Some(ref input) = user_input {
         if input.starts_with("__HBIMG__:") || input.starts_with("data:image/") {
@@ -1115,12 +1220,13 @@ async fn run_python_code(
 
     let _ = app.emit("execution-stdout", StreamPayload {
         text: format!(
-            "[HuggingBox] Launching model execution\n  model: {}\n  env: {}\n  python: {}\n  device: {}\n  input: {}\n",
+            "[HuggingBox] Launching model execution\n  model: {}\n  env: {}\n  python: {}\n  device: {}\n  input: {}\n  ffmpeg: {}\n",
             model,
             execution_env_model.as_deref().unwrap_or("<default>"),
             python,
             device,
-            input_kind
+            input_kind,
+            ffmpeg_path.as_deref().unwrap_or("<not found>")
         ),
     });
     if let Some(path) = env_storage_path.as_deref() {
@@ -1130,9 +1236,25 @@ async fn run_python_code(
             });
         }
     }
+    if let Some(script_path) = &run_target_path {
+        let _ = app.emit("execution-stdout", StreamPayload {
+            text: format!(
+                "[HuggingBox] Executing visible editor file\n  workspace: {}\n  script: {}\n",
+                workspace_root
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "<unknown>".to_string()),
+                script_path.to_string_lossy()
+            ),
+        });
+    }
     let _ = app.emit("execution-stdout", StreamPayload {
         text: format!("[HuggingBox] Runner command args: {:?}\n", run_args),
     });
+
+    if let Some(root) = &workspace_root {
+        command.current_dir(root);
+    }
 
     let mut child = command
         .args(&run_args)
@@ -1374,12 +1496,78 @@ print("[HuggingBox] Download complete.", flush=True)
     let stdout = child.stdout.take().ok_or("no stdout")?;
     let stderr = child.stderr.take().ok_or("no stderr")?;
     let app2 = app.clone();
+    let scanner_state = Arc::new(Mutex::new(DownloadTelemetrySnapshot::default()));
+    let scanner_live = Arc::new(AtomicBool::new(true));
+
+    let scanner_task = {
+        let app_scan = app.clone();
+        let model_dir_scan = model_dir.clone();
+        let scanner_state = scanner_state.clone();
+        let scanner_live = scanner_live.clone();
+        tokio::spawn(async move {
+            let mut last_size = compute_dir_size(&model_dir_scan);
+            let mut last_tick = std::time::Instant::now();
+            while scanner_live.load(Ordering::Relaxed) {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                if !scanner_live.load(Ordering::Relaxed) {
+                    break;
+                }
+                if last_tick.elapsed() < std::time::Duration::from_secs(10) {
+                    continue;
+                }
+
+                let current_size = compute_dir_size(&model_dir_scan);
+                let now = std::time::Instant::now();
+                let elapsed = (now - last_tick).as_secs_f64().max(0.001);
+                let delta = current_size.saturating_sub(last_size);
+                let speed = delta as f64 / elapsed;
+                last_size = current_size;
+                last_tick = now;
+
+                let snap = scanner_state.lock().map(|s| s.clone()).unwrap_or_default();
+                let percent = if snap.total_bytes > 0 {
+                    (current_size as f64 / snap.total_bytes as f64 * 100.0).clamp(0.0, 100.0)
+                } else if snap.files_total > 0 {
+                    (snap.files_done as f64 / snap.files_total as f64 * 100.0).clamp(0.0, 100.0)
+                } else {
+                    0.0
+                };
+                let remaining = snap.total_bytes.saturating_sub(current_size);
+                let eta = if speed > 0.0 && snap.total_bytes > 0 {
+                    Some(remaining as f64 / speed)
+                } else {
+                    None
+                };
+
+                let _ = app_scan.emit("download-stats", DownloadStatsPayload {
+                    percent,
+                    downloaded_bytes: current_size,
+                    total_bytes: snap.total_bytes,
+                    speed_bps: speed,
+                    eta_seconds: eta,
+                    phase: "scanning".to_string(),
+                    files_done: snap.files_done,
+                    files_total: snap.files_total,
+                    filename: snap.filename.clone(),
+                });
+            }
+        })
+    };
 
     let t1 = tokio::spawn(async move {
+        let _ = app.emit("download-progress", StreamPayload {
+            text: "[HuggingBox] Download folder-size sampler enabled (10s interval).\n".to_string(),
+        });
         let mut lines = tokio::io::BufReader::new(stdout).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             if let Some(json_part) = line.strip_prefix("HB_DOWNLOAD_JSON:") {
                 if let Ok(stats) = serde_json::from_str::<DownloadJsonLine>(json_part) {
+                    if let Ok(mut snap) = scanner_state.lock() {
+                        snap.total_bytes = stats.total_bytes;
+                        snap.files_done = stats.files_done;
+                        snap.files_total = stats.files_total;
+                        snap.filename = stats.filename.clone();
+                    }
                     let _ = app.emit("download-stats", DownloadStatsPayload {
                         percent: stats.percent,
                         downloaded_bytes: stats.downloaded_bytes,
@@ -1406,7 +1594,9 @@ print("[HuggingBox] Download complete.", flush=True)
     });
 
     let status = child.wait().await.map_err(|e| e.to_string())?;
+    scanner_live.store(false, Ordering::Relaxed);
     let _ = tokio::join!(t1, t2);
+    let _ = scanner_task.await;
 
     {
         let mut lock = pid_arc.lock().unwrap();
@@ -1639,7 +1829,6 @@ import re
 import sys
 import shlex
 from huggingface_hub import HfApi, hf_hub_download
-from transformers import AutoConfig, AutoModel
 
 model_id = sys.argv[1]
 token = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else None
@@ -1734,7 +1923,7 @@ def extract_repo_requirements(model_id: str, token: str | None):
             return
         # Validate requirement-ish tokens while preserving version specifiers.
         if not re.fullmatch(
-            r"[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[^\]]+\])?(?:\s*(?:==|~=|>=|<=|!=|>|<)\s*[A-Za-z0-9*+_.-]+)?(?:\s*;[^\n]+)?",
+            r"[A-Za-z][A-Za-z0-9._-]*(?:\[[^\]]+\])?(?:\s*(?:==|~=|>=|<=|!=|>|<)\s*[A-Za-z0-9*+_.-]+)?(?:\s*;[^\n]+)?",
             req,
         ):
             return
@@ -1762,7 +1951,7 @@ def extract_repo_requirements(model_id: str, token: str | None):
                     continue
                 add_req(tok)
 
-        req_with_version_pattern = r"[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[^\]]+\])?\s*(?:==|~=|>=|<=|!=|>|<)\s*[A-Za-z0-9*+_.-]+(?:\s*;[^\n]+)?"
+        req_with_version_pattern = r"[A-Za-z][A-Za-z0-9._-]*(?:\[[^\]]+\])?\s*(?:==|~=|>=|<=|!=|>|<)\s*[A-Za-z0-9*+_.-]+(?:\s*;[^\n]+)?"
 
         # Parse fenced code blocks where dependency pins are often listed.
         for block in re.findall(r"```(?:bash|sh|shell|zsh|txt|python)?\s*\n(.*?)```", text, flags=re.IGNORECASE | re.DOTALL):
@@ -1785,12 +1974,12 @@ def extract_repo_requirements(model_id: str, token: str | None):
                 if re.search(req_with_version_pattern, l):
                     for token in re.findall(req_with_version_pattern, l):
                         add_req(token)
-                elif re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[^\]]+\])?", l):
+                elif re.fullmatch(r"[A-Za-z][A-Za-z0-9._-]*(?:\[[^\]]+\])?", l):
                     add_req(l)
 
         # Inline backticked version pins, e.g. `transformers==4.41.2`
         for token in re.findall(
-            r"`([A-Za-z0-9][A-Za-z0-9._-]*(?:\[[^\]]+\])?\s*(?:==|~=|>=|<=|!=|>|<)\s*[A-Za-z0-9*+_.-]+(?:\s*;[^\n`]+)?)`",
+            r"`([A-Za-z][A-Za-z0-9._-]*(?:\[[^\]]+\])?\s*(?:==|~=|>=|<=|!=|>|<)\s*[A-Za-z0-9*+_.-]+(?:\s*;[^\n`]+)?)`",
             text,
             flags=re.IGNORECASE,
         ):
@@ -1842,6 +2031,20 @@ def extract_repo_requirements(model_id: str, token: str | None):
 
 compatibility_error = None
 required = extract_repo_requirements(model_id, token)
+try:
+    from transformers import AutoConfig, AutoModel
+except Exception as import_err:
+    err_text = str(import_err)
+    missing = extract_missing_packages(err_text)
+    if not missing:
+        missing = ["transformers"]
+    print("HB_PROBE_JSON:" + json.dumps({
+        "missingPackages": missing,
+        "requiredPackages": required,
+        "compatibilityError": None,
+    }), flush=True)
+    sys.exit(0)
+
 try:
     cfg = call_with_token(AutoConfig.from_pretrained, model_id, trust_remote_code=True)
     call_with_token(AutoModel.from_config, cfg, trust_remote_code=True)

@@ -529,17 +529,47 @@ function WorkspaceLayout({
     }
   }, [currentDirectory, modelId, refreshWorkspaceEntries, settings.modelStoragePath]);
 
-  function handleRun() {
-    runCode({
+  const saveEditorFile = useCallback(async () => {
+    const targetPath = selectedFilePath ?? 'huggingbox_main.py';
+    setEditorStatus('Saving...');
+    await writeModelWorkspaceFile(
       modelId,
-      storagePath: settings.modelStoragePath,
-      hfToken: settings.hfToken,
-      pipelineTag: model.pipeline_tag,
-      preferredDevice: settings.preferredDevice,
-      selectedGpuId: settings.selectedGpuId,
-      userInput: inputValue.trim() || undefined,
-      envStoragePath: settings.envStoragePath || undefined,
-    });
+      settings.modelStoragePath,
+      targetPath,
+      editorCode
+    );
+    setEditorStatus('Saved');
+    setTimeout(() => setEditorStatus('Python'), 1000);
+    return targetPath;
+  }, [editorCode, modelId, selectedFilePath, settings.modelStoragePath]);
+
+  async function handleRun() {
+    const trimmedInput = inputValue.trim();
+    if (
+      ['automatic-speech-recognition', 'audio-classification'].includes(model.pipeline_tag ?? '') &&
+      !trimmedInput
+    ) {
+      window.alert('Select an audio file before running this model.');
+      return;
+    }
+
+    try {
+      const scriptRelativePath = await saveEditorFile();
+      runCode({
+        modelId,
+        storagePath: settings.modelStoragePath,
+        hfToken: settings.hfToken,
+        pipelineTag: model.pipeline_tag,
+        preferredDevice: settings.preferredDevice,
+        selectedGpuId: settings.selectedGpuId,
+        userInput: trimmedInput || undefined,
+        envStoragePath: settings.envStoragePath || undefined,
+        scriptRelativePath,
+      });
+    } catch (error) {
+      setEditorStatus('Save failed');
+      setWorkspaceError(`Failed saving before run: ${String(error)}`);
+    }
   }
 
   return (

@@ -2,9 +2,9 @@
 
 ## Agentic AI-Assisted Build Strategy
 
-**Version:** 1.0
-**Last Updated:** March 2026
-**Related Document:** PRD_LocalModelRunner.md
+**Version:** 1.1
+**Last Updated:** March 11, 2026
+**Related Document:** docs/PRD.md
 
 ---
 
@@ -13,6 +13,24 @@
 This plan breaks HuggingBox development into 10 sprints, each two weeks long. Each sprint targets a specific capability layer — starting with the UI shell and progressively adding model type compatibility. By the end of Sprint 10, the app supports the majority of models on Hugging Face across text, vision, audio, image generation, and multimodal categories.
 
 Each sprint includes a section on **agentic AI tooling** — the specific MCP servers, coding tools, skills, and techniques that an engineer using Cursor/AI IDE, Cursor, or similar tools should leverage to maximise output quality and speed.
+
+---
+
+## Current Implementation Snapshot (March 11, 2026)
+
+Implemented in code today:
+
+- Per-model virtual environments with optional environment reuse.
+- First-run-only auto dependency installation policy.
+- Runtime dependency installation before dependency probing.
+- Dependency probe plus model-declared requirement alignment support.
+- Background execution/download continuation while navigating.
+- Clickable status bar execution state that returns to active model workspace.
+- Model workspace file explorer + autosaved files (stored in model folder).
+- Interactive terminal in output panel running inside model venv.
+- Download telemetry with periodic folder-size sampling every 10 seconds.
+
+This section reflects current shipped behavior and should be used to assess sprint completion state.
 
 ---
 

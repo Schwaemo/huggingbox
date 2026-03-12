@@ -2,10 +2,44 @@
 
 ## Local AI Model Runner & Code Generator
 
-**Version:** 1.0
-**Last Updated:** March 2026
+**Version:** 1.1
+**Last Updated:** March 11, 2026
 **Author:** tng4480
 **Status:** Draft
+
+---
+
+## 0. Current Implementation Snapshot (March 11, 2026)
+
+This section reflects how the shipped code currently behaves. If this conflicts with later roadmap sections, this snapshot takes precedence.
+
+### 0.1 Runtime Pipeline (Implemented)
+
+1. Create/select model virtual environment.
+2. Install download dependencies (`huggingface_hub`, `hf_transfer`) when missing.
+3. Download model files if missing.
+4. Detect runtime type from generated code metadata (`RUNTIME:` marker).
+5. Install runtime dependencies (for example `transformers`) before probing.
+6. Run dependency probe (collect missing imports, model-declared requirements, compatibility warnings).
+7. Execute model with `hf_auto_runner`.
+
+### 0.2 Environment Behavior (Implemented)
+
+- The app uses isolated Python virtual environments keyed by model ID.
+- If a model has no environment yet, the user is prompted to either create a new isolated environment (recommended) or select an existing environment by model ID.
+- Auto dependency installation is enabled only on the first run of a model, then disabled for that model. After first run, users can manage packages manually from the in-app terminal.
+
+### 0.3 Workspace and Terminal (Implemented)
+
+- Each model has a workspace folder under model storage.
+- The editor is backed by workspace files (default `huggingbox_main.py`) and autosaves changes.
+- Phase 2 includes a file explorer (create/open file or folder) and an interactive terminal running inside the model environment.
+
+### 0.4 Background Execution and Progress (Implemented)
+
+- Execution continues if the user navigates away from the model page.
+- The status bar execution segment is clickable and returns the user to the active model workspace.
+- Download telemetry includes streamed progress plus periodic folder-size sampling (10 second interval) to estimate speed/ETA.
 
 ---
 
@@ -43,29 +77,6 @@ Instead of building a universal runtime abstraction, HuggingBox uses a determini
 
 ### 2.1 Key Differentiator
 
-No existing product combines Hugging Face catalogue browsing, local multi-modal execution, and visible/editable generated code. The closest analogy is \"a local Jupyter notebook that writes itself, connected to every model on Hugging Face.\"
-
----|---|---|
-| **Curious beginners** | Non-technical users who want to try AI models | One-click code generation, guided experience |
-| **Students & learners** | CS/ML students exploring model architectures | Readable, well-commented generated code |
-| **Intermediate developers** | Developers who know Python but not the ML ecosystem | Skip boilerplate, jump straight to experimentation |
-| **Advanced practitioners** | ML engineers evaluating models quickly | Fast local testing, full code control |
-
----
-
-## 2. Competitive Landscape
-
-| Product | Local Inference | Model Browsing | Multi-Modal | Code Visibility | Cross-Platform |
-|---|---|---|---|---|---|
-| Hugging Face Spaces | No (remote) | Yes | Yes | No | Web only |
-| Ollama | Yes | Limited | LLMs only | No | Desktop |
-| LM Studio | Yes | Own catalogue | LLMs only | No | Desktop |
-| GPT4All | Yes | Limited | LLMs only | No | Desktop |
-| WebLLM | Yes (browser) | No | LLMs only | No | Web only |
-| **HuggingBox** | **Yes** | **Full HF catalogue** | **Yes** | **Yes (editable)** | **Desktop → all** |
-
-### 2.1 Key Differentiator
-
 No existing product combines Hugging Face catalogue browsing, local multi-modal execution, and visible/editable generated code. The closest analogy is "a local Jupyter notebook that writes itself, connected to every model on Hugging Face."
 
 ---
@@ -76,42 +87,42 @@ No existing product combines Hugging Face catalogue browsing, local multi-modal 
 
 ```
 Open app
-  → Browse / search Hugging Face models
-  → Click a model
-  → View model card: description, size, RAM estimate, pipeline type
-  → Click "Generate Code"
-  → hf_auto_runner inspects model metadata via huggingface_hub, detects architecture, selects runtime, and generates deterministic Python code
-  → Code appears in embedded editor (Monaco)
-  → User reviews / edits code (optional)
-  → Click "Run"
-  → App checks dependencies, installs if missing
-  → Python sidecar executes code
-  → Output streams into result panel (text / image / audio)
-  → User iterates: edit code, re-run, try different inputs
+  -> Browse / search Hugging Face models
+  -> Click a model
+  -> View model card: description, size, RAM estimate, pipeline type
+  -> Click "Generate Code"
+  -> hf_auto_runner inspects model metadata via huggingface_hub, detects architecture, selects runtime, and generates deterministic Python code
+  -> Code appears in embedded editor + model workspace
+  -> User reviews / edits code (optional)
+  -> Click "Run"
+  -> App validates environment, resolves dependencies/downloads, then probes model dependencies
+  -> Python sidecar executes code
+  -> Output and logs stream into the result panel
+  -> User iterates: edit code, re-run, run shell commands in model venv
 ```
 
 ### 3.2 First-Time Setup
 
 ```
 Install app
-  → App detects system: OS, RAM, GPU, disk space
-  → App installs base Python environment (bundled or managed)
-  → Core packages pre-installed: transformers, torch, onnxruntime
-  → User sets model storage directory
-  → Ready to browse
+  -> App detects system: OS, RAM, GPU, disk space
+  -> User sets model and environment storage paths
+  -> Python bootstrap is prepared
+  -> First model run creates/selects a per-model environment
+  -> Dependencies are installed on demand
+  -> Ready to browse
 ```
 
 ### 3.3 Returning User
 
 ```
 Open app
-  → "My Models" tab shows previously downloaded models
-  → Click model → code editor pre-populated with last session's code
-  → Run immediately, no re-download needed
+  -> "My Models" tab shows previously downloaded models
+  -> Click model -> workspace and editor load model file(s)
+  -> Run immediately if environment/dependencies are already present
 ```
 
 ---
-
 ## 4. Product Architecture
 
 ### 4.1 High-Level Architecture
@@ -240,48 +251,45 @@ Since hf_auto_runner is local, offline mode is fully supported (as long as model
 
 ### 6.1 Python Environment Management
 
-**Option A: Bundled Environment (Recommended for Phase 1)**
+Current behavior is a managed per-model environment strategy:
 
-Ship a self-contained Python distribution with the app installer. Pre-install core packages:
+- One virtual environment per execution environment ID (usually model ID).
+- Environment root is user-configurable.
+- If no environment exists for a model, user chooses either a new isolated environment (recommended) or a reusable existing environment.
 
-- `transformers`
-- `torch` (CPU build initially, GPU build optional download)
-- `onnxruntime`
-- `Pillow`
-- `soundfile`
-- `accelerate`
-- `sentencepiece`
+### 6.2 Dynamic Dependency Installation (Current Sequence)
 
-Approximate base environment size: 3–5 GB.
+When the user clicks "Run", the app executes this sequence:
 
-**Option B: Managed System Python (Phase 2)**
+1. Check/install download dependencies (`huggingface_hub`, `hf_transfer`).
+2. Download model files if missing.
+3. Detect runtime type from generated code metadata.
+4. Check/install runtime dependencies before probe.
+5. Probe model dependencies and compatibility.
+6. Optionally align version-pinned model requirements.
+7. Install remaining missing dependencies.
+8. Launch execution.
 
-Detect existing Python installations, create a dedicated virtual environment, install dependencies as needed. Lighter installer but more fragile.
+Notes:
 
-### 6.2 Dynamic Dependency Installation
-
-When the user clicks "Run":
-
-1. App parses import statements in the editor code.
-2. Compares against installed packages in the managed environment.
-3. If missing packages detected, prompt user: "This model requires `diffusers`. Install now?"
-4. Install via pip into the managed environment.
-5. Cache the dependency resolution so subsequent runs skip this step.
+- Auto-install is allowed only on the first run of a model.
+- After first run, missing packages must be installed manually via in-app terminal.
+- Install logic prefers CUDA wheels when a CUDA GPU is detected.
+- `transformers` installation is normalized to Hugging Face transformers source.
 
 ### 6.3 Process Lifecycle
 
 ```
 User clicks "Run"
-  → Parse imports, check dependencies
-  → Spawn Python subprocess with managed environment
-  → Stream stdout to output panel in real time
-  → Stream stderr to error console
-  → Monitor memory usage (warn if approaching limit)
-  → On completion: parse output (text/image/audio) and render
-  → On error: display traceback in error panel with readable formatting
-  → On user cancel: send SIGTERM, clean up temp files
+  -> Ensure/select model environment
+  -> Resolve dependencies and model download state
+  -> Spawn Python subprocess with managed environment
+  -> Stream stdout to output panel in real time
+  -> Stream stderr to console section in real time
+  -> On completion: parse output (text/image/audio) and render
+  -> On error: display traceback and diagnostics
+  -> On user cancel: terminate process and clean up
 ```
-
 ### 6.4 Output Handling by Pipeline Type
 
 | Pipeline Type | Output Format | Frontend Rendering |

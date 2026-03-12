@@ -45,7 +45,10 @@ export async function fetchModelDetail(
   const headers: HeadersInit = {};
   if (hfToken) headers['Authorization'] = `Bearer ${hfToken}`;
 
-  const res = await fetch(`${HF_API_BASE}/models/${modelId}`, { headers });
+  const query = new URLSearchParams();
+  query.set('blobs', 'true');
+  query.set('full', 'true');
+  const res = await fetch(`${HF_API_BASE}/models/${modelId}?${query}`, { headers });
   if (!res.ok) throw new Error(`HF API error: ${res.status}`);
 
   const data: HFModelDetail = await res.json();
@@ -54,8 +57,27 @@ export async function fetchModelDetail(
 
 // Estimate total model size in bytes from siblings list
 export function estimateModelSize(model: HFModel): number {
-  if (!model.siblings?.length) return 0;
-  return model.siblings.reduce((acc, f) => acc + (f.size ?? 0), 0);
+  const fromSiblings = (model.siblings ?? []).reduce((acc, f) => {
+    const direct = typeof f.size === 'number' ? f.size : 0;
+    const lfs = typeof f.lfs?.size === 'number' ? f.lfs.size : 0;
+    return acc + (direct > 0 ? direct : lfs > 0 ? lfs : 0);
+  }, 0);
+  if (fromSiblings > 0) return fromSiblings;
+
+  const safetensorsTotal = (model as HFModelDetail).safetensors?.total;
+  if (typeof safetensorsTotal === 'number' && safetensorsTotal > 0) {
+    return safetensorsTotal;
+  }
+
+  const idLike = (model.modelId || model.id || '').toLowerCase();
+  const match = idLike.match(/(\d+(?:\.\d+)?)\s*([bm])/i);
+  if (!match) return 0;
+  const count = Number(match[1]);
+  if (!Number.isFinite(count) || count <= 0) return 0;
+  const scale = match[2].toLowerCase() === 'b' ? 1_000_000_000 : 1_000_000;
+  const params = count * scale;
+  // Conservative fp16-style estimate: ~2 bytes/parameter.
+  return Math.round(params * 2);
 }
 
 // Format bytes to human-readable string

@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { Copy, CheckCheck, ChevronDown, ChevronRight, Terminal } from 'lucide-react';
-import { invoke } from '@tauri-apps/api/core';
+import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../../stores/appStore';
 import { parseExecutionOutput } from '../../utils/outputParser';
 
@@ -51,6 +51,94 @@ export default function OutputPanel({ modelId, pipelineTag, inputValue = '' }: O
   }, [inputValue]);
 
   function renderStructuredOutput() {
+    if (parsed.kind === 'audio_transcript' && parsed.data && typeof parsed.data === 'object') {
+      const transcript = parsed.data as {
+        text?: string;
+        chunks?: Array<{ text?: string; timestamp?: [number | null, number | null] | null }>;
+      };
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          <div
+            style={{
+              fontFamily: '"Inter", sans-serif',
+              fontSize: '14px',
+              color: 'var(--text-primary)',
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+            }}
+          >
+            {transcript.text?.trim() || executionOutput}
+          </div>
+          {Array.isArray(transcript.chunks) && transcript.chunks.length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+              {transcript.chunks.map((chunk, idx) => {
+                const start = chunk.timestamp?.[0];
+                const end = chunk.timestamp?.[1];
+                const range =
+                  start !== undefined && start !== null
+                    ? `${Number(start).toFixed(2)}s${end !== undefined && end !== null ? ` -> ${Number(end).toFixed(2)}s` : ''}`
+                    : null;
+                return (
+                  <div
+                    key={`chunk-${idx}`}
+                    style={{
+                      border: '1px solid var(--border)',
+                      borderRadius: '4px',
+                      padding: '8px',
+                      backgroundColor: 'var(--bg-secondary)',
+                    }}
+                  >
+                    {range && (
+                      <div
+                        style={{
+                          fontFamily: '"JetBrains Mono", monospace',
+                          fontSize: '11px',
+                          color: 'var(--text-muted)',
+                          marginBottom: '4px',
+                        }}
+                      >
+                        {range}
+                      </div>
+                    )}
+                    <div
+                      style={{
+                        fontFamily: '"Inter", sans-serif',
+                        fontSize: '13px',
+                        color: 'var(--text-secondary)',
+                        whiteSpace: 'pre-wrap',
+                        wordBreak: 'break-word',
+                      }}
+                    >
+                      {chunk.text?.trim() || '(no text)'}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    if (parsed.kind === 'audio_file' && typeof parsed.data === 'string' && parsed.data.trim()) {
+      const audioPath = parsed.data.trim();
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          <audio controls src={convertFileSrc(audioPath)} style={{ width: '100%' }} />
+          <div
+            style={{
+              fontFamily: '"JetBrains Mono", monospace',
+              fontSize: '11px',
+              color: 'var(--text-muted)',
+              wordBreak: 'break-all',
+            }}
+          >
+            {audioPath}
+          </div>
+        </div>
+      );
+    }
+
     if (parsed.kind === 'classification' && Array.isArray(parsed.data)) {
       const items = [...parsed.data]
         .filter((x) => x && typeof x === 'object')

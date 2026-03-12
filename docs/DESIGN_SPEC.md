@@ -4,8 +4,8 @@
 
 **This document is the single source of truth for all design, interaction, and implementation decisions. AI agents building this application must follow this spec exactly. When in doubt, this document overrides the PRD and Sprint Plan.**
 
-**Version:** 1.0
-**Last Updated:** March 2026
+**Version:** 1.1
+**Last Updated:** March 11, 2026
 
 ---
 
@@ -15,8 +15,47 @@ These were open questions in the PRD. They are now settled.
 
 | Decision | Resolution | Implication |
 |---|---|---|
-| **Offline mode** | Full offline support. The app requires internet only to download model weights and metadata. Operations on downloaded models run fully locally. || **User data collection** | Zero telemetry. No analytics. No usage tracking. No crash reporting. No data leaves the user's machine except calls to the Hugging Face API. | No Sentry. No Mixpanel. No PostHog. No opt-in analytics. The only outbound network calls are to `huggingface.co`. |
+| **Offline mode** | Full offline support. The app requires internet only to download model weights and metadata. Operations on downloaded models run fully locally. | Downloaded models can run without network calls. |
+| **User data collection** | Zero telemetry. No analytics. No usage tracking. No crash reporting. No data leaves the user's machine except calls to the Hugging Face API. | No Sentry. No Mixpanel. No PostHog. No opt-in analytics. The only outbound network calls are to `huggingface.co`. |
 | **Product name** | HuggingBox (working title, subject to change). | Use "HuggingBox" throughout the UI. |
+
+---
+
+## 0. Current Implementation Overrides (March 11, 2026)
+
+This section reflects current code behavior and overrides older design text where there is conflict.
+
+### 0.1 Execution Pipeline
+
+Current run sequence:
+
+1. Create/select model environment.
+2. Install download dependencies (`huggingface_hub`, `hf_transfer`) if missing.
+3. Download model if missing.
+4. Detect runtime type from generated code metadata (`RUNTIME:`).
+5. Install runtime dependencies before probing.
+6. Run dependency probe.
+7. Execute model.
+
+### 0.2 Environment Policy
+
+- Virtual environments are isolated per model environment ID.
+- If no environment exists, the user chooses:
+  - create new isolated environment (recommended), or
+  - use an existing environment.
+- Auto-install is first-run only per model. Later runs require manual package management through the terminal panel when dependencies are missing.
+
+### 0.3 Workspace and Output Panel
+
+- Phase 2 includes a file explorer next to Monaco.
+- Workspace files are stored in the model folder (default file `huggingbox_main.py`).
+- Output panel includes an interactive terminal executing commands inside the selected model environment.
+
+### 0.4 Background Runs and Status Bar
+
+- Execution and download continue when user navigates away from the model page.
+- Status bar execution segment is clickable and navigates back to the active execution workspace.
+- Download speed/ETA includes periodic folder-size sampling every 10 seconds.
 
 ---
 
@@ -149,7 +188,8 @@ The app uses a fixed three-region layout with a header, main content area, and s
 - Background: `--bg-secondary`.
 - Font: JetBrains Mono, 12px, `--text-secondary`.
 - Left section: RAM usage (`Used / Total GB`), GPU info (name + VRAM or "No GPU detected").
-- Center: Execution state. One of: "Idle", "Running... (elapsed time)", "Completed (elapsed time)", "Error".
+- Center: Execution state button. States include: "Idle", "Running... (elapsed time)", "Running... (installing packages)", "Running... (downloading model)", "Completed (elapsed time)", "Error", "Cancelled".
+- Center button behavior: if an execution model is active, clicking the center segment navigates back to that model workspace.
 - Right: Python environment status. One of: "Python Ready", "Installing packages...", "Environment Error".
 
 The status bar updates every 2 seconds during execution (RAM usage, elapsed time).
@@ -301,12 +341,14 @@ Phase 2 (after code generation): The view transitions to the three-panel workspa
 └────────────────────┴─────────────────────────────────────┘
 ```
 
-**Panel split rules:**
+**Panel split rules (current implementation):**
 
-- Input Panel: 280px fixed width, not resizable. Left side.
-- Code Editor and Output Panel: share the remaining width. They are stacked vertically with a draggable horizontal splitter. Default split: 60% editor, 40% output.
-- The vertical splitter between Input Panel and the editor/output area is draggable.
-- Minimum widths: Input Panel 240px, Code Editor 400px.
+- Input Panel: 280px fixed width, minimum 240px.
+- Right workspace column:
+  - top region: file explorer + Monaco editor (about 55% height),
+  - bottom region: output panel (about 45% height).
+- File explorer sits to the left of Monaco (about 230px wide, minimum 190px).
+- Output panel includes both streamed model output and an interactive terminal.
 
 ### 2.6 My Models View
 
@@ -462,68 +504,42 @@ No other settings. Keep it minimal.
 ```
 1. User is on Model Detail Phase 2 with code in the editor.
 2. User optionally edits code in Monaco editor.
-3. User provides input in the Input Panel:
-   - Text models: types text into textarea.
-   - Vision models: drops an image or clicks "Upload Image" button.
-   - Audio models: drops an audio file, clicks "Upload Audio", or clicks "Record" 
-     (microphone button).
-   - Image generation: types a prompt, optionally adjusts parameters 
-     (steps, guidance scale, seed).
-4. User clicks "▶ Run" in the Input Panel.
-5. Pre-run checks (sequential):
-   a. Parse imports from editor code.
-   b. Check installed packages against imports.
-   c. If missing packages detected:
-      - Show overlay in Output Panel: 
-        "Missing packages: diffusers, xformers. Install now?"
-        Buttons: "Install" (primary), "Cancel" (ghost).
-      - On "Install": pip install runs, progress shown in Output Panel.
-      - On install complete: execution continues automatically.
-      - On install error: show error in Output Panel, do not execute.
-   d. Check model files:
-      - If model not yet downloaded: start download.
-        - Download progress bar appears in Output Panel.
-        - Download can be cancelled.
-        - On download complete: execution continues automatically.
-      - If model already downloaded: skip to execution.
+3. User provides input in the Input Panel.
+4. User clicks "Run" in the Input Panel.
+5. Pre-run orchestration (sequential):
+   a. Resolve/select execution environment.
+      - If no environment exists, prompt user:
+        - Create new isolated environment (recommended), or
+        - Reuse an existing environment.
+   b. Check/install download dependencies (`huggingface_hub`, `hf_transfer`).
+   c. Check model download status and download if missing.
+   d. Detect runtime type from generated code metadata (`RUNTIME:`).
+   e. Check/install runtime dependencies before dependency probing.
+   f. Run dependency probe to collect:
+      - missing packages,
+      - model-declared requirements,
+      - compatibility warnings.
+   g. Optionally align model-declared version-pinned requirements.
+   h. Install remaining missing packages.
 6. Execution begins:
-   - "▶ Run" button changes to "■ Stop" (danger style).
-   - Status bar center: "Running... 0s" (timer increments every second).
-   - Output Panel clears previous output, shows cursor/spinner.
-   - Python sidecar spawns subprocess with editor code.
-7. During execution:
-   - stdout streams to Output Panel in real time.
-   - For text generation: tokens appear one by one (typewriter effect).
-   - For image generation: progress updates appear ("Step 12/50...").
-   - stderr streams to a collapsible "Errors" section below the main output.
-   - Status bar RAM updates every 2 seconds.
-8. Execution completes:
-   - "■ Stop" reverts to "▶ Run".
-   - Status bar: "Completed (4.2s)".
-   - Output Panel displays final result in the appropriate renderer 
-     (see Section 4 for per-pipeline output rendering).
-9. Execution error:
-   - Status bar: "Error".
-   - Output Panel shows formatted error:
-     ┌─────────────────────────────────────────┐
-     │  ❌ Execution Error                     │
-     │                                         │
-     │  RuntimeError: CUDA out of memory       │
-     │                                         │
-     │  Suggestion: This model requires more   │
-     │  VRAM than available. Try adding         │
-     │  device_map="auto" or using a smaller    │
-     │  quantised version.                     │
-     │                                         │
-     │  Full traceback ▼ (collapsible)          │
-     └─────────────────────────────────────────┘
-   - Common errors get human-readable suggestions (see Section 6).
-10. User clicks "■ Stop" during execution:
-    - SIGTERM sent to Python process.
-    - If process doesn't exit within 3 seconds, SIGKILL.
-    - Status bar: "Cancelled".
-    - Output Panel shows whatever was captured so far + "Execution cancelled by user."
+   - Input panel switches from Run to Stop.
+   - Status bar center shows running state with elapsed time.
+   - Output panel streams stdout.
+   - Console section streams stderr/diagnostics.
+7. Execution completes:
+   - Status bar: Completed.
+   - Output panel shows final parsed output.
+8. Execution error:
+   - Status bar: Error.
+   - Output panel and console retain diagnostics for debugging.
+9. User clicks Stop during execution:
+   - Cancellation command is sent to the running process.
+   - Status bar: Cancelled.
 ```
+
+Current policy note:
+- Automatic dependency installation is first-run-only per model. On later runs, missing packages must be installed manually through the terminal panel.
+- If user navigates away while running/downloading, work continues in background.
 
 ### 3.5 Model Download Flow
 
@@ -539,6 +555,7 @@ No other settings. Keep it minimal.
    │                                         │
    │  [ Cancel Download ]                    │
    └─────────────────────────────────────────┘
+   - Implementation note: backend also samples the model folder size every 10 seconds to estimate download speed when file-level progress is sparse.
 3. Files download to {storage_path}/{org}/{model_name}/.
 4. On complete: "Download complete. Ready to run." 
    Execution proceeds automatically if triggered by Run.
@@ -1029,3 +1046,4 @@ No spring physics. No bounce effects. No parallax. No particle effects.
 - Screen reader: All buttons have descriptive `aria-label` attributes. Status bar content is an `aria-live` region.
 - Dropdown menus use proper `role="listbox"` and `role="option"` semantics.
 - Modal dialogs trap focus and return focus to the trigger element on close.
+

@@ -5,6 +5,7 @@ class RuntimeRouter:
         self.metadata = metadata
         self.config = metadata.get("config", {})
         self.filenames = metadata.get("filenames", [])
+        self.pipeline_tag = (metadata.get("pipeline_tag") or "").lower()
         
     def get_architecture(self) -> str:
         architectures = self.config.get("architectures", [])
@@ -34,6 +35,14 @@ class RuntimeRouter:
             or model_type in ["llava", "qwen2_vl", "paligemma", "glm", "deepseek_vl_v2"]
         ):
             return "transformers_multimodal"
+
+        if self.pipeline_tag in {
+            "automatic-speech-recognition",
+            "audio-classification",
+            "text-to-speech",
+            "text-to-audio",
+        }:
+            return "transformers_audio"
             
         if "causallm" in arch_string or model_type in ["llama", "mistral", "gemma", "qwen2", "phi"]:
             return "transformers_llm"

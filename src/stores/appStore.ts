@@ -13,7 +13,11 @@ export interface HFModel {
   cardData?: {
     license?: string;
   };
-  siblings?: Array<{ rfilename: string; size?: number }>;
+  siblings?: Array<{
+    rfilename: string;
+    size?: number;
+    lfs?: { size?: number | null };
+  }>;
   description?: string;
 }
 

@@ -1,5 +1,6 @@
 import { useMemo, useRef, useState } from 'react';
-import { Play, Square, Upload, Mic } from 'lucide-react';
+import { open } from '@tauri-apps/plugin-dialog';
+import { Play, Square, Upload } from 'lucide-react';
 import Button from '../shared/Button';
 
 interface InputPanelProps {
@@ -19,7 +20,7 @@ function getInputType(pipeline: string | null | undefined): 'text' | 'image' | '
   if (!pipeline) return 'text';
   if (['image-classification', 'image-segmentation', 'object-detection', 'depth-estimation',
        'image-to-image', 'image-text-to-text', 'image-to-text'].includes(pipeline)) return 'image';
-  if (['automatic-speech-recognition', 'audio-classification', 'text-to-speech'].includes(pipeline)) return 'audio';
+  if (['automatic-speech-recognition', 'audio-classification'].includes(pipeline)) return 'audio';
   if (pipeline === 'text-to-image') return 'prompt';
   return 'text';
 }
@@ -109,6 +110,11 @@ export default function InputPanel({
     if (isImageDataUrl(inputValue)) return inputValue;
     return '';
   }, [inputValue]);
+  const audioFileLabel = useMemo(() => {
+    if (inputType !== 'audio' || !inputValue) return '';
+    const normalized = inputValue.replace(/\\/g, '/');
+    return normalized.split('/').pop() ?? normalized;
+  }, [inputType, inputValue]);
 
   async function handleImageFile(file: File | undefined) {
     if (!file) return;
@@ -120,6 +126,30 @@ export default function InputPanel({
       }
     };
     reader.readAsDataURL(file);
+  }
+
+  async function handleChooseAudioFile() {
+    const selected = await open({
+      multiple: false,
+      directory: false,
+      filters: [
+        {
+          name: 'Audio',
+          extensions: ['wav', 'mp3', 'flac'],
+        },
+      ],
+    });
+    if (typeof selected === 'string' && selected.trim()) {
+      onInputChange(selected);
+    }
+  }
+
+  function handleDroppedAudioFile(file: File | undefined) {
+    if (!file) return;
+    const candidate = file as File & { path?: string };
+    if (candidate.path && candidate.path.trim()) {
+      onInputChange(candidate.path);
+    }
   }
 
   function emitTextInput(val: string) {
@@ -343,7 +373,16 @@ export default function InputPanel({
         {/* Audio upload */}
         {inputType === 'audio' && (
           <div
-            onClick={() => fileRef.current?.click()}
+            onClick={() => {
+              void handleChooseAudioFile();
+            }}
+            onDragOver={(e) => {
+              e.preventDefault();
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              handleDroppedAudioFile(e.dataTransfer.files?.[0]);
+            }}
             style={{
               flex: 1,
               minHeight: '120px',
@@ -367,14 +406,18 @@ export default function InputPanel({
               (e.currentTarget as HTMLDivElement).style.color = 'var(--text-muted)';
             }}
           >
-            <Mic size={24} strokeWidth={1.5} />
+            <Upload size={24} strokeWidth={1.5} />
             <span style={{ fontFamily: '"Inter", sans-serif', fontSize: '13px' }}>
-              Click to upload audio
+              {audioFileLabel ? 'Click to replace audio file' : 'Click to upload audio'}
             </span>
             <span style={{ fontFamily: '"Inter", sans-serif', fontSize: '11px' }}>
               WAV, MP3, FLAC
             </span>
-            <input ref={fileRef} type="file" accept="audio/*" style={{ display: 'none' }} />
+            {audioFileLabel && (
+              <span style={{ fontFamily: '"JetBrains Mono", monospace', fontSize: '11px', color: 'var(--text-secondary)' }}>
+                {audioFileLabel}
+              </span>
+            )}
           </div>
         )}
       </div>

@@ -25,7 +25,8 @@
     "active": true,
     "targets": "all",
     "resources": [
-      "../hf_auto_runner"
+      "../hf_auto_runner",
+      "bin"
     ],
     "icon": [
       "icons/32x32.png",

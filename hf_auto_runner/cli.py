@@ -54,9 +54,14 @@ def run_model(model_id: str, user_input: str = "", hf_token: str = ""):
     print("ENVIRONMENT: created")
     
     # Step 5: Install dependencies
-    dep_manager = DependencyManager(python_exec, runtime)
-    dep_manager.install_dependencies()
-    print("DEPENDENCIES: installed")
+    skip_dep_install = os.environ.get("HB_SKIP_DEP_INSTALL", "").strip().lower() in {"1", "true", "yes", "on"}
+    if skip_dep_install:
+        print("DEPENDENCIES: skipped")
+        _debug("dependency install skipped because HB_SKIP_DEP_INSTALL is set")
+    else:
+        dep_manager = DependencyManager(python_exec, runtime)
+        dep_manager.install_dependencies()
+        print("DEPENDENCIES: installed")
     
     # Step 6 & 7: Generate inference script
     script_gen = ScriptGenerator(model_id, metadata, runtime, architecture)

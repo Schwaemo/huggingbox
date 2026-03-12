@@ -53,8 +53,58 @@ function uniqueDependencies(items: string[]): string[] {
   return out;
 }
 
+function requirementPackageName(requirement: string): string {
+  const trimmed = requirement.trim();
+  const match = trimmed.match(/^[A-Za-z][A-Za-z0-9._-]*/);
+  return normalizeDependencyName(match?.[0] ?? trimmed);
+}
+
+function uniqueRequirementSpecs(items: string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of items) {
+    const raw = item.trim();
+    const key = requirementPackageName(raw);
+    if (!raw || !key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(raw);
+  }
+  return out;
+}
+
+function filterRequirementSpecsByMissing(specs: string[], missingPackages: string[]): string[] {
+  const missing = new Set(missingPackages.map((item) => normalizeDependencyName(item)));
+  return specs.filter((spec) => missing.has(requirementPackageName(spec)));
+}
+
 function hasVersionSpecifier(requirement: string): boolean {
   return /[<>=!~]/.test(requirement);
+}
+
+function detectRuntimeTypeFromCode(code: string | null | undefined): string {
+  const raw = (code ?? '').trim();
+  if (!raw) return 'transformers_llm';
+  const match = raw.match(/^\s*#?\s*RUNTIME:\s*([A-Za-z0-9._-]+)/im);
+  if (!match?.[1]) return 'transformers_llm';
+  return match[1].trim().toLowerCase();
+}
+
+function runtimeDependenciesForType(runtimeType: string): string[] {
+  const runtime = runtimeType.trim().toLowerCase();
+  if (!runtime) return ['transformers'];
+  if (runtime === 'transformers_audio') {
+    return ['transformers', 'accelerate', 'torch', 'librosa', 'soundfile', 'sentencepiece'];
+  }
+  if (runtime.startsWith('transformers')) {
+    return ['transformers'];
+  }
+  if (runtime.startsWith('diffusers')) {
+    return ['diffusers', 'transformers'];
+  }
+  if (runtime.startsWith('sentence_transformers')) {
+    return ['sentence-transformers', 'transformers'];
+  }
+  return ['transformers'];
 }
 
 function modelRunOnceKey(modelId: string): string {
@@ -281,6 +331,7 @@ export function useExecution() {
       selectedGpuId?: string | null;
       userInput?: string;
       envStoragePath?: string;
+      scriptRelativePath?: string;
     }
   ) => {
     const store = useAppStore.getState();
@@ -414,6 +465,61 @@ export function useExecution() {
       }
     }
 
+    const runtimeType = detectRuntimeTypeFromCode(store.generatedCode);
+    const runtimePackages = uniqueDependencies(runtimeDependenciesForType(runtimeType));
+    if (runtimePackages.length > 0) {
+      appendLog(`Detected runtime type: ${runtimeType}`);
+      appendLog(`Checking runtime dependencies before probe: ${runtimePackages.join(', ')}`);
+      try {
+        const missingRuntime = uniqueDependencies(await invoke<string[]>('check_packages', {
+          packages: runtimePackages,
+          modelId: options?.modelId ?? null,
+          venvModelId: executionEnvModelId,
+        }));
+        if (missingRuntime.length > 0) {
+          if (!allowAutoInstall) {
+            stopTimer();
+            store.setExecutionState('error');
+            store.setExecutionError(
+              `Runtime dependencies missing (${missingRuntime.join(', ')}). Auto installs are disabled after first run for this model. Install manually from the terminal panel.`
+            );
+            store.setDownloadStats(null);
+            appendLog(`Missing runtime dependencies with auto-install disabled: ${missingRuntime.join(', ')}`);
+            return;
+          }
+
+          const approved = window.confirm(
+            `Runtime dependencies are required before dependency probing:\n\n${missingRuntime.join(', ')}\n\nInstall now?`
+          );
+          if (!approved) {
+            stopTimer();
+            store.setExecutionState('idle');
+            store.setExecutionError(
+              `Execution cancelled. Runtime dependencies were not installed: ${missingRuntime.join(', ')}`
+            );
+            store.setDownloadStats(null);
+            return;
+          }
+
+          store.setExecutionState('installing');
+          appendLog(`Installing runtime dependencies before probe: ${missingRuntime.join(', ')}`);
+          await invoke('install_packages', {
+            packages: missingRuntime,
+            modelId: options?.modelId ?? null,
+            venvModelId: executionEnvModelId,
+          });
+          appendLog('Runtime dependency installation complete.');
+        }
+      } catch (err) {
+        stopTimer();
+        store.setExecutionState('error');
+        store.setExecutionError(`Runtime dependency installation failed: ${String(err)}`);
+        store.setDownloadStats(null);
+        appendLog(`Runtime dependency installation failed: ${String(err)}`);
+        return;
+      }
+    }
+
     const packages: string[] = [];
     let requiredFromProbe: string[] = [];
     let compatibilityWarning: string | null = null;
@@ -433,7 +539,7 @@ export function useExecution() {
           appendLog(`Model probe found missing imports: ${missingFromProbe.join(', ')}`);
         }
 
-        requiredFromProbe = uniqueDependencies(probe.requiredPackages ?? []);
+        requiredFromProbe = uniqueRequirementSpecs(probe.requiredPackages ?? []);
         if (requiredFromProbe.length > 0) {
           appendLog(`Model-declared requirements: ${requiredFromProbe.join(', ')}`);
         }
@@ -443,7 +549,18 @@ export function useExecution() {
           appendLog(`Compatibility warning: ${probe.compatibilityError}`);
         }
       } catch (err) {
-        appendLog(`Dependency probe failed (continuing): ${String(err)}`);
+        const probeError = String(err);
+        if (/No module named ['"]?transformers['"]?/i.test(probeError)) {
+          stopTimer();
+          store.setExecutionState('error');
+          store.setExecutionError(
+            'Dependency probe failed because transformers is missing from the selected environment.'
+          );
+          store.setDownloadStats(null);
+          appendLog(`Dependency probe failed due to missing transformers: ${probeError}`);
+          return;
+        }
+        appendLog(`Dependency probe failed (continuing): ${probeError}`);
       }
     }
 
@@ -484,6 +601,53 @@ export function useExecution() {
             return;
           }
         }
+      }
+    }
+
+    if (requiredFromProbe.length > 0) {
+      try {
+        const missingRequiredNames = uniqueDependencies(await invoke<string[]>('check_packages', {
+          packages: uniqueDependencies(requiredFromProbe.map(requirementPackageName)),
+          modelId: options?.modelId ?? null,
+          venvModelId: executionEnvModelId,
+        }));
+        const missingRequiredSpecs = filterRequirementSpecsByMissing(requiredFromProbe, missingRequiredNames);
+
+        if (missingRequiredSpecs.length > 0) {
+          if (!allowAutoInstall) {
+            appendLog(
+              `Skipping model-declared requirement install because auto-install is disabled: ${missingRequiredSpecs.join(', ')}`
+            );
+          } else {
+            const approved = window.confirm(
+              `Model-declared Python requirements were found:\n\n${missingRequiredSpecs.join('\n')}\n\nInstall now?`
+            );
+            if (!approved) {
+              store.setExecutionState('idle');
+              store.setExecutionError(
+                `Execution cancelled. Model-declared requirements were not installed: ${missingRequiredSpecs.join(', ')}`
+              );
+              store.setDownloadStats(null);
+              return;
+            }
+
+            store.setExecutionState('installing');
+            appendLog(`Installing model-declared requirements: ${missingRequiredSpecs.join(', ')}`);
+            await invoke('install_packages', {
+              packages: missingRequiredSpecs,
+              modelId: options?.modelId ?? null,
+              venvModelId: executionEnvModelId,
+            });
+            appendLog('Model-declared requirement installation complete.');
+          }
+        }
+      } catch (err) {
+        stopTimer();
+        store.setExecutionState('error');
+        store.setExecutionError(`Model-declared requirement installation failed: ${String(err)}`);
+        store.setDownloadStats(null);
+        appendLog(`Model-declared requirement installation failed: ${String(err)}`);
+        return;
       }
     }
 
@@ -536,6 +700,7 @@ export function useExecution() {
         options?.selectedGpuId ? `, gpu=${options.selectedGpuId}` : ''
       }${options?.envStoragePath ? `, envStorage=${options.envStoragePath}` : ''}${
         executionEnvModelId ? `, envModel=${executionEnvModelId}` : ''
+      }${options?.scriptRelativePath ? `, script=${options.scriptRelativePath}` : ''
       }`
     );
 
@@ -548,6 +713,8 @@ export function useExecution() {
         hfToken: options?.hfToken ?? null,
         userInput: options?.userInput ?? null,
         envStoragePath: options?.envStoragePath || null,
+        storagePath: options?.storagePath || null,
+        scriptRelativePath: options?.scriptRelativePath || null,
       });
     } catch (err) {
       stopTimer();

@@ -46,6 +46,7 @@ class ModelInspector:
             "model_id": self.model_id,
             "filenames": filenames,
             "config": config,
+            "pipeline_tag": getattr(info, "pipeline_tag", None),
             "has_processor": "processor_config.json" in filenames or "preprocessor_config.json" in filenames,
             "has_tokenizer": "tokenizer.json" in filenames or "tokenizer_config.json" in filenames
         }

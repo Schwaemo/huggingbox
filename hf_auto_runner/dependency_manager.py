@@ -35,7 +35,7 @@ class DependencyManager:
             ]
             
         if self.runtime == "transformers_audio":
-            return ["transformers", "accelerate", "torch", "librosa", "soundfile"]
+            return ["transformers", "accelerate", "torch", "librosa", "soundfile", "sentencepiece"]
             
         # Generic transformers fallback
         return ["transformers", "accelerate", "torch", "sentencepiece", "pillow"]
