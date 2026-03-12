@@ -119,23 +119,38 @@ export default function ModelDetailView() {
           setClaudeAnalysis(generated.analysis);
           setCodeSource('generated');
 
-          if (
-            usingClaude &&
-            settings.claudeAutoInstallDependencies &&
-            Array.isArray(generated.dependencies) &&
-            generated.dependencies.length > 0
-          ) {
-            const approved = window.confirm(
-              `Claude suggested these Python dependencies for ${modelId}:\n\n${generated.dependencies.join('\n')}\n\nInstall them into this model environment now?`
-            );
-            if (approved) {
-              await invoke('install_packages', {
-                packages: generated.dependencies,
-                modelId,
-                venvModelId: modelId,
-              });
+          if (usingClaude && Array.isArray(generated.dependencies) && generated.dependencies.length > 0) {
+            const missingClaudeDependencies = await invoke<string[]>('check_packages', {
+              packages: generated.dependencies,
+              modelId,
+              venvModelId: modelId,
+            });
+
+            if (missingClaudeDependencies.length === 0) {
               setClaudeAnalysis(
-                `${generated.analysis}\n\nInstalled Claude-suggested dependencies:\n${generated.dependencies.join(', ')}`
+                `${generated.analysis}\n\nClaude-suggested dependencies are already installed in this model environment.`
+              );
+            } else if (settings.claudeAutoInstallDependencies) {
+              const approved = window.confirm(
+                `Claude suggested these Python dependencies for ${modelId}.\n\nAlready installed dependencies were skipped.\n\nMissing dependencies:\n${missingClaudeDependencies.join('\n')}\n\nInstall the missing dependencies into this model environment now?`
+              );
+              if (approved) {
+                await invoke('install_packages', {
+                  packages: missingClaudeDependencies,
+                  modelId,
+                  venvModelId: modelId,
+                });
+                setClaudeAnalysis(
+                  `${generated.analysis}\n\nInstalled Claude-suggested missing dependencies:\n${missingClaudeDependencies.join(', ')}`
+                );
+              } else {
+                setClaudeAnalysis(
+                  `${generated.analysis}\n\nClaude-suggested missing dependencies:\n${missingClaudeDependencies.join(', ')}`
+                );
+              }
+            } else {
+              setClaudeAnalysis(
+                `${generated.analysis}\n\nClaude-suggested missing dependencies:\n${missingClaudeDependencies.join(', ')}`
               );
             }
           }

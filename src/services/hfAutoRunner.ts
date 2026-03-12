@@ -59,6 +59,29 @@ function parseRunnerResponse(raw: string): RawGenerationResponse {
   );
 }
 
+function normalizeDependencyName(raw: string): string {
+  return raw.trim().toLowerCase().replace(/^['"`]+|['"`]+$/g, '');
+}
+
+function withHfTransfer(dependencies: string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+
+  for (const dep of dependencies) {
+    const trimmed = dep.trim();
+    const key = normalizeDependencyName(trimmed);
+    if (!trimmed || !key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(trimmed);
+  }
+
+  if (!seen.has('hf_transfer')) {
+    out.push('hf_transfer');
+  }
+
+  return out;
+}
+
 async function fetchModelReadme(modelId: string, hfToken?: string): Promise<string> {
   const headers: HeadersInit = {};
   if (hfToken) headers['Authorization'] = `Bearer ${hfToken}`;
@@ -185,14 +208,19 @@ export async function generateCodeWithClaude(
       '- For image models, HB_INPUT may be an absolute local file path, an HTTP/HTTPS URL, or a data URL. The app may also prefix image uploads with __HBIMG__:.',
       '- For audio models, HB_INPUT is usually an absolute local file path to the user-selected audio file.',
       '- The script must handle missing or empty HB_INPUT gracefully with a sensible fallback message or default behavior.',
-      '- It must read the Hugging Face token from environment variable HF_TOKEN when available, but fall back to no token if HF_TOKEN is unset or empty.',
-      '- If it writes an audio output file, it must print HB_OUTPUT_AUDIO:<absolute_path>.',
-      '- It must be runnable directly with python script.py inside a model workspace.',
-      '- Prefer repository-documented libraries over generic transformers if the README indicates a custom runtime.',
-      '- Only include dependencies that are actually needed by the generated script.',
-      '- Keep dependencies pip-installable. If the README mentions non-pip system packages, mention them in analysis instead of dependencies.',
-      '',
-      `Model ID: ${modelId}`,
+        '- It must read the Hugging Face token from environment variable HF_TOKEN when available, but fall back to no token if HF_TOKEN is unset or empty.',
+        '- If it writes an audio output file, it must print HB_OUTPUT_AUDIO:<absolute_path>.',
+        '- It must be runnable directly with python script.py inside a model workspace.',
+        '- Prefer repository-documented libraries over generic transformers if the README indicates a custom runtime.',
+        '- Only include dependencies that are actually needed by the generated script.',
+        '- Keep dependencies pip-installable. If the README mentions non-pip system packages, mention them in analysis instead of dependencies.',
+        '- The script must be verbose about progress logging.',
+        '- Add print statements before and after every major step: input parsing, dependency/runtime selection, model loading, processor/tokenizer loading, preprocessing, inference, post-processing, and file output.',
+        '- For long-running operations, print a clear status message immediately before the call so the app does not appear stuck.',
+        '- All progress logs must flush immediately. Use print(..., flush=True) or equivalent.',
+        '- Preserve machine-readable output markers like HB_OUTPUT_AUDIO:<absolute_path>, but keep the rest of the script logs human-readable and explicit.',
+        '',
+        `Model ID: ${modelId}`,
       `Pipeline Tag: ${model.pipeline_tag ?? 'unknown'}`,
       `Author: ${model.author ?? 'unknown'}`,
       `Tags: ${(model.tags ?? []).join(', ')}`,
@@ -225,9 +253,11 @@ export async function generateCodeWithClaude(
     return {
       code: parsed.code,
       analysis: parsed.analysis,
-      dependencies: Array.isArray(parsed.dependencies)
-        ? parsed.dependencies.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
-        : [],
+      dependencies: withHfTransfer(
+        Array.isArray(parsed.dependencies)
+          ? parsed.dependencies.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+          : []
+      ),
     };
   } catch (error) {
     throw error;
