@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, AlertCircle, RefreshCw } from 'lucide-react';
+import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../../stores/appStore';
 import type { HFModelDetail } from '../../stores/appStore';
 import { fetchModelDetail, estimateModelSize, formatBytes } from '../../services/huggingfaceApi';
@@ -8,6 +9,7 @@ import {
   buildCacheIdentity,
   buildFallbackAnalysis,
   buildFallbackCode,
+  generateCodeWithClaude,
   generateCodeLocally,
 } from '../../services/hfAutoRunner';
 import {
@@ -87,10 +89,16 @@ export default function ModelDetailView() {
   async function generateCode(options?: { bypassCache?: boolean }) {
     if (!modelDetail) return;
     setCodeGenerationError(null);
+
+    if (settings.codeGenerationProvider === 'claude-sonnet' && !settings.claudeApiKey.trim()) {
+      setCodeGenerationError('Claude Sonnet generation requires an Anthropic API key in Settings.');
+      return;
+    }
+
     setCodeGenerating(true);
 
     const modelId = modelDetail.modelId ?? modelDetail.id;
-    const cacheIdentity = buildCacheIdentity(modelDetail, systemInfo);
+    const cacheIdentity = `${buildCacheIdentity(modelDetail, systemInfo)}_generator:${settings.codeGenerationProvider}`;
     const bypassCache = options?.bypassCache === true;
 
     try {
@@ -103,17 +111,45 @@ export default function ModelDetailView() {
       } else {
         let code: string;
         try {
-          const generated = await generateCodeLocally(modelDetail, settings, systemInfo);
+          const usingClaude = settings.codeGenerationProvider === 'claude-sonnet';
+          const generated = usingClaude
+            ? await generateCodeWithClaude(modelDetail, settings, systemInfo)
+            : await generateCodeLocally(modelDetail, settings, systemInfo);
           code = generated.code;
           setClaudeAnalysis(generated.analysis);
           setCodeSource('generated');
+
+          if (
+            usingClaude &&
+            settings.claudeAutoInstallDependencies &&
+            Array.isArray(generated.dependencies) &&
+            generated.dependencies.length > 0
+          ) {
+            const approved = window.confirm(
+              `Claude suggested these Python dependencies for ${modelId}:\n\n${generated.dependencies.join('\n')}\n\nInstall them into this model environment now?`
+            );
+            if (approved) {
+              await invoke('install_packages', {
+                packages: generated.dependencies,
+                modelId,
+                venvModelId: modelId,
+              });
+              setClaudeAnalysis(
+                `${generated.analysis}\n\nInstalled Claude-suggested dependencies:\n${generated.dependencies.join(', ')}`
+              );
+            }
+          }
         } catch (err) {
-          console.error("Local python generation failed", err);
+          const providerLabel =
+            settings.codeGenerationProvider === 'claude-sonnet'
+              ? 'Claude Sonnet'
+              : 'hf_auto_runner';
+          console.error(`${providerLabel} generation failed`, err);
           code = buildFallbackCode(modelDetail);
           setClaudeAnalysis(buildFallbackAnalysis(modelDetail, systemInfo, String(err)));
           setCodeSource('generated');
           setCodeGenerationError(
-            `hf_auto_runner failed to generate code. Loaded a local fallback template instead. Error: ${String(err)}`
+            `${providerLabel} failed to generate code. Loaded a local fallback template instead. Error: ${String(err)}`
           );
         }
 

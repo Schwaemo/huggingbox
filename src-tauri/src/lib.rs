@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::process::Stdio;
 use std::path::PathBuf;
+use reqwest::Client;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use sysinfo::System;
@@ -101,6 +102,11 @@ struct CodeCacheRecord {
     code: String,
 }
 
+#[derive(Serialize, Deserialize)]
+struct ClaudeGenerationResponse {
+    text: String,
+}
+
 #[derive(Serialize)]
 struct PythonBootstrapInfo {
     ready: bool,
@@ -166,6 +172,10 @@ struct AppSettingsPayload {
     env_storage_path: String,
     preferred_device: String,
     selected_gpu_id: Option<String>,
+    #[serde(default)]
+    code_generation_provider: String,
+    #[serde(default)]
+    claude_auto_install_dependencies: bool,
     theme: String,
 }
 
@@ -1060,6 +1070,99 @@ async fn generate_python_code_local(app: AppHandle, model_id: String, hf_token: 
     }
 
     Ok(value.to_string())
+}
+
+#[tauri::command]
+async fn generate_code_with_claude(
+    model: String,
+    api_key: String,
+    prompt: String,
+) -> Result<ClaudeGenerationResponse, String> {
+    let trimmed_key = api_key.trim();
+    if trimmed_key.is_empty() {
+        return Err("Anthropic API key is required.".to_string());
+    }
+    if prompt.trim().is_empty() {
+        return Err("Claude prompt is empty.".to_string());
+    }
+
+    let client = Client::new();
+    let body = serde_json::json!({
+        "model": model,
+        "max_tokens": 4125,
+        "temperature": 0,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": prompt,
+                    }
+                ]
+            }
+        ],
+        "thinking": {
+            "type": "disabled"
+        },
+        "output_config": {
+            "effort": "low"
+        }
+    });
+
+    let response = client
+        .post("https://api.anthropic.com/v1/messages")
+        .header("content-type", "application/json")
+        .header("x-api-key", trimmed_key)
+        .header("anthropic-version", "2023-06-01")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Anthropic request failed: {}", e))?;
+
+    let status = response.status();
+    let payload = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read Anthropic response: {}", e))?;
+
+    if !status.is_success() {
+        return Err(format!(
+            "Anthropic API error {}:\n{}",
+            status.as_u16(),
+            payload
+        ));
+    }
+
+    let parsed: serde_json::Value = serde_json::from_str(&payload)
+        .map_err(|e| format!("Failed to parse Anthropic response JSON: {}\n{}", e, payload))?;
+
+    let text = parsed
+        .get("content")
+        .and_then(|v| v.as_array())
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|block| {
+                    if block.get("type").and_then(|v| v.as_str()) == Some("text") {
+                        block.get("text").and_then(|v| v.as_str()).map(|v| v.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+
+    if text.trim().is_empty() {
+        return Err(format!(
+            "Anthropic API returned no text blocks.\n{}",
+            payload
+        ));
+    }
+
+    Ok(ClaudeGenerationResponse { text })
 }
 
 #[tauri::command]
@@ -2555,6 +2658,7 @@ pub fn run() {
             bootstrap_python_environment,
             detect_python,
             generate_python_code_local,
+            generate_code_with_claude,
             run_python_code,
             run_model_shell_command,
             cancel_execution,

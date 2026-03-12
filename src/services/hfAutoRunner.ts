@@ -4,6 +4,7 @@ import type { HFModelDetail, AppSettings, SystemInfo } from '../stores/appStore'
 interface CodeGenerationResponse {
   code: string;
   analysis: string;
+  dependencies?: string[];
 }
 
 interface RawGenerationResponse extends Partial<CodeGenerationResponse> {
@@ -14,6 +15,12 @@ interface RawGenerationResponse extends Partial<CodeGenerationResponse> {
   debugStderr?: string;
   exitCode?: string;
 }
+
+interface AnthropicMessagesResponse {
+  text?: string;
+}
+
+const CLAUDE_SONNET_MODEL = 'claude-sonnet-4-6';
 
 function previewText(raw: string, max = 2200): string {
   const trimmed = raw.trim();
@@ -50,6 +57,19 @@ function parseRunnerResponse(raw: string): RawGenerationResponse {
   throw new Error(
     `Runner output is not valid JSON. Raw output preview:\n${previewText(raw)}`
   );
+}
+
+async function fetchModelReadme(modelId: string, hfToken?: string): Promise<string> {
+  const headers: HeadersInit = {};
+  if (hfToken) headers['Authorization'] = `Bearer ${hfToken}`;
+
+  const response = await fetch(`https://huggingface.co/${modelId}/raw/main/README.md`, {
+    headers,
+  });
+  if (!response.ok) {
+    return '';
+  }
+  return response.text();
 }
 
 export function buildCacheIdentity(model: HFModelDetail, system: SystemInfo): string {
@@ -117,6 +137,100 @@ export async function generateCodeLocally(
   } catch (error) {
      console.error("Local code generation failed:", error);
      throw new Error(`Could not generate local script: ${error}`);
+  }
+}
+
+export async function generateCodeWithClaude(
+  model: HFModelDetail,
+  settings: AppSettings,
+  system: SystemInfo
+): Promise<CodeGenerationResponse> {
+  const modelId = model.modelId || model.id;
+  const claudeApiKey = settings.claudeApiKey?.trim();
+
+  if (!modelId) {
+    throw new Error('Model ID is required to generate code.');
+  }
+  if (!claudeApiKey) {
+    throw new Error('Anthropic API key is required for Claude Sonnet generation.');
+  }
+  try {
+    const readme = (model.readme?.trim() ? model.readme : await fetchModelReadme(modelId, settings.hfToken?.trim() || undefined)).trim();
+    const siblingNames = (model.siblings ?? []).map((item) => item.rfilename).slice(0, 200);
+    const systemSummary = {
+      totalRamGb: Number((system.totalRam / 1024 ** 3).toFixed(1)),
+      availableRamGb: Number((system.availableRam / 1024 ** 3).toFixed(1)),
+      gpuName: system.gpuName,
+      gpuVramGb: system.gpuVram,
+      os: system.os,
+    };
+
+    const prompt = [
+      'Read the Hugging Face model metadata and README below and generate a single-file Python script for local inference.',
+      '',
+      'Return strict JSON only with this exact shape:',
+      '{',
+      '  "analysis": "short explanation of the runtime choice and constraints",',
+      '  "code": "full python script as a string",',
+      '  "dependencies": ["pip package spec", "..."]',
+      '}',
+      '',
+      'Requirements for the Python script:',
+      '- It must be a single file.',
+      '- It must use the provided model id exactly.',
+      '- It must read user input from environment variable HB_INPUT.',
+      '- HB_INPUT contains the user-provided input from the app and should be treated as the primary runtime input contract.',
+      '- For text models, HB_INPUT is plain text.',
+      '- For question-answering, HB_INPUT may contain a JSON payload encoded as a string.',
+      '- For image models, HB_INPUT may be an absolute local file path, an HTTP/HTTPS URL, or a data URL. The app may also prefix image uploads with __HBIMG__:.',
+      '- For audio models, HB_INPUT is usually an absolute local file path to the user-selected audio file.',
+      '- The script must handle missing or empty HB_INPUT gracefully with a sensible fallback message or default behavior.',
+      '- It must read the Hugging Face token from environment variable HF_TOKEN when available, but fall back to no token if HF_TOKEN is unset or empty.',
+      '- If it writes an audio output file, it must print HB_OUTPUT_AUDIO:<absolute_path>.',
+      '- It must be runnable directly with python script.py inside a model workspace.',
+      '- Prefer repository-documented libraries over generic transformers if the README indicates a custom runtime.',
+      '- Only include dependencies that are actually needed by the generated script.',
+      '- Keep dependencies pip-installable. If the README mentions non-pip system packages, mention them in analysis instead of dependencies.',
+      '',
+      `Model ID: ${modelId}`,
+      `Pipeline Tag: ${model.pipeline_tag ?? 'unknown'}`,
+      `Author: ${model.author ?? 'unknown'}`,
+      `Tags: ${(model.tags ?? []).join(', ')}`,
+      `Description: ${model.description ?? ''}`,
+      `Sibling Files: ${JSON.stringify(siblingNames)}`,
+      `System Info: ${JSON.stringify(systemSummary)}`,
+      '',
+      'README:',
+      readme || '(README not available)',
+    ].join('\n');
+
+    const payload = await invoke<AnthropicMessagesResponse>('generate_code_with_claude', {
+      model: CLAUDE_SONNET_MODEL,
+      apiKey: claudeApiKey,
+      prompt,
+    });
+    const text = payload.text?.trim() ?? '';
+
+    if (!text) {
+      throw new Error('Anthropic API returned no text content.');
+    }
+
+    const parsed = parseRunnerResponse(text);
+    if (!parsed.code || !parsed.analysis) {
+      throw new Error(
+        `Claude Sonnet returned an invalid payload.\nPayload preview:\n${previewText(text)}`
+      );
+    }
+
+    return {
+      code: parsed.code,
+      analysis: parsed.analysis,
+      dependencies: Array.isArray(parsed.dependencies)
+        ? parsed.dependencies.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+        : [],
+    };
+  } catch (error) {
+    throw error;
   }
 }
 

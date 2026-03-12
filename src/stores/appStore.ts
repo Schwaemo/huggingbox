@@ -63,10 +63,13 @@ export interface SystemInfo {
 
 export interface AppSettings {
   hfToken: string;
+  claudeApiKey: string;
   modelStoragePath: string;
   envStoragePath: string;
   preferredDevice: 'auto' | 'cpu' | 'cuda';
   selectedGpuId: string | null;
+  codeGenerationProvider: 'autorunner' | 'claude-sonnet';
+  claudeAutoInstallDependencies: boolean;
   theme: 'dark' | 'light';
 }
 
@@ -230,10 +233,13 @@ export const useAppStore = create<AppStore>((set) => ({
   // Settings
   settings: {
     hfToken: '',
+    claudeApiKey: '',
     modelStoragePath: '~/HuggingBox/models/',
     envStoragePath: '',
     preferredDevice: 'auto',
     selectedGpuId: null,
+    codeGenerationProvider: 'autorunner',
+    claudeAutoInstallDependencies: false,
     theme: 'dark',
   },
 

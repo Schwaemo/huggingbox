@@ -291,6 +291,80 @@ export default function SettingsView() {
           </Field>
         </div>
 
+        {/* Code Generation */}
+        <div style={SECTION_STYLE}>
+          <h2 style={SECTION_TITLE}>Code Generation</h2>
+          <Field
+            label="Default Generator"
+            helper="Choose whether Generate Code uses the deterministic local auto runner or Anthropic Claude Sonnet reading the model README."
+          >
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-sm)' }}>
+              {([
+                { value: 'autorunner', label: 'Auto Runner (default)' },
+                { value: 'claude-sonnet', label: 'Claude Sonnet' },
+              ] as const).map((option) => (
+                <label
+                  key={option.value}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 'var(--space-sm)',
+                    cursor: 'pointer',
+                    fontFamily: '"Inter", sans-serif',
+                    fontSize: '14px',
+                    color: 'var(--text-primary)',
+                  }}
+                >
+                  <input
+                    type="radio"
+                    name="code-generator"
+                    value={option.value}
+                    checked={settings.codeGenerationProvider === option.value}
+                    onChange={() => updateSettings({ codeGenerationProvider: option.value })}
+                    style={{ accentColor: 'var(--accent-primary)' }}
+                  />
+                  {option.label}
+                </label>
+              ))}
+            </div>
+          </Field>
+          <Field
+            label="Anthropic API Key"
+            helper="Required before Claude Sonnet can be used for code generation."
+            helperLink={{ text: 'console.anthropic.com', href: 'https://console.anthropic.com/' }}
+          >
+            <PasswordInput
+              value={settings.claudeApiKey}
+              onChange={(v) => updateSettings({ claudeApiKey: v })}
+              placeholder="sk-ant-..."
+            />
+          </Field>
+          <Field
+            label="Claude Dependency Install"
+            helper="If enabled, HuggingBox will offer to install Claude-suggested Python packages into the model environment after generation."
+          >
+            <label
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 'var(--space-sm)',
+                cursor: 'pointer',
+                fontFamily: '"Inter", sans-serif',
+                fontSize: '14px',
+                color: 'var(--text-primary)',
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={settings.claudeAutoInstallDependencies}
+                onChange={(e) => updateSettings({ claudeAutoInstallDependencies: e.target.checked })}
+                style={{ accentColor: 'var(--accent-primary)' }}
+              />
+              Offer dependency installation after Claude generation
+            </label>
+          </Field>
+        </div>
+
         {/* Model Storage */}
         <div style={SECTION_STYLE}>
           <h2 style={SECTION_TITLE}>Model Storage</h2>
