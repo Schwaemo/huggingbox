@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { Copy, CheckCheck, ChevronDown, ChevronRight, Terminal } from 'lucide-react';
-import { convertFileSrc, invoke } from '@tauri-apps/api/core';
+import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../../stores/appStore';
 import { parseExecutionOutput } from '../../utils/outputParser';
 
@@ -30,11 +30,13 @@ export default function OutputPanel({ modelId, pipelineTag, inputValue = '' }: O
   const appendStderrOutput = useAppStore((s) => s.appendStderrOutput);
 
   const [stderrOpen, setStderrOpen] = useState(true);
+  const [stdoutOpen, setStdoutOpen] = useState(true);
   const [copied, setCopied] = useState(false);
   const [terminalInput, setTerminalInput] = useState('');
   const [terminalBusy, setTerminalBusy] = useState(false);
   const [terminalCwd, setTerminalCwd] = useState<string | null>(null);
   const [hasTerminalActivity, setHasTerminalActivity] = useState(false);
+  const [audioBlobUrl, setAudioBlobUrl] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const isRunning = executionState === 'running' || executionState === 'installing';
@@ -44,6 +46,7 @@ export default function OutputPanel({ modelId, pipelineTag, inputValue = '' }: O
       ? activeExecutionEnvModelId
       : modelId;
   const parsed = parseExecutionOutput(executionOutput, pipelineTag);
+  const structuredOutput = renderStructuredOutput();
   const imageSource = useMemo(() => {
     if (inputValue.startsWith('__HBIMG__:')) return inputValue.slice('__HBIMG__:'.length);
     if (inputValue.startsWith('data:image/')) return inputValue;
@@ -124,7 +127,7 @@ export default function OutputPanel({ modelId, pipelineTag, inputValue = '' }: O
       const audioPath = parsed.data.trim();
       return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-          <audio controls src={convertFileSrc(audioPath)} style={{ width: '100%' }} />
+          <audio controls src={audioBlobUrl ?? undefined} style={{ width: '100%' }} />
           <div
             style={{
               fontFamily: '"JetBrains Mono", monospace',
@@ -284,6 +287,7 @@ export default function OutputPanel({ modelId, pipelineTag, inputValue = '' }: O
 
   const hasStderr = stderrOutput.length > 0;
   const isDownloading = executionState === 'downloading';
+  const showStructuredOutput = structuredOutput !== null && !hasTerminalActivity;
 
   function formatBytes(bytes: number): string {
     if (bytes <= 0) return '0 B';
@@ -311,6 +315,47 @@ export default function OutputPanel({ modelId, pipelineTag, inputValue = '' }: O
       setHasTerminalActivity(false);
     }
   }, [executionOutput]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let nextUrl: string | null = null;
+
+    async function loadAudioBlob(path: string) {
+      try {
+        const bytes = await invoke<number[]>('read_binary_file', { filePath: path });
+        if (cancelled) return;
+        const blob = new Blob([new Uint8Array(bytes)], { type: 'audio/wav' });
+        nextUrl = URL.createObjectURL(blob);
+        setAudioBlobUrl((previous) => {
+          if (previous) URL.revokeObjectURL(previous);
+          return nextUrl;
+        });
+      } catch {
+        if (!cancelled) {
+          setAudioBlobUrl((previous) => {
+            if (previous) URL.revokeObjectURL(previous);
+            return null;
+          });
+        }
+      }
+    }
+
+    if (parsed.kind === 'audio_file' && typeof parsed.data === 'string' && parsed.data.trim()) {
+      void loadAudioBlob(parsed.data.trim());
+    } else {
+      setAudioBlobUrl((previous) => {
+        if (previous) URL.revokeObjectURL(previous);
+        return null;
+      });
+    }
+
+    return () => {
+      cancelled = true;
+      if (nextUrl) {
+        URL.revokeObjectURL(nextUrl);
+      }
+    };
+  }, [parsed.kind, parsed.data]);
 
   function handleCopy() {
     navigator.clipboard.writeText(executionOutput).catch(() => {});
@@ -548,7 +593,54 @@ export default function OutputPanel({ modelId, pipelineTag, inputValue = '' }: O
             {executionError}
           </span>
         )}
-        {hasTerminalActivity ? executionOutput : (renderStructuredOutput() ?? executionOutput)}
+        {showStructuredOutput ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            {structuredOutput}
+            {hasOutput && (
+              <div style={{ borderTop: '1px solid var(--border)', paddingTop: '12px' }}>
+                <button
+                  onClick={() => setStdoutOpen((v) => !v)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    width: '100%',
+                    padding: 0,
+                    marginBottom: stdoutOpen ? '8px' : 0,
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    color: 'var(--text-muted)',
+                    fontFamily: '"JetBrains Mono", monospace',
+                    fontSize: '11px',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.06em',
+                  }}
+                >
+                  {stdoutOpen
+                    ? <ChevronDown size={12} strokeWidth={1.5} />
+                    : <ChevronRight size={12} strokeWidth={1.5} />
+                  }
+                  Stdout
+                </button>
+                {stdoutOpen && (
+                  <div
+                    style={{
+                      fontFamily: '"JetBrains Mono", monospace',
+                      fontSize: '12px',
+                      color: 'var(--text-secondary)',
+                      whiteSpace: 'pre-wrap',
+                      wordBreak: 'break-all',
+                      lineHeight: 1.5,
+                    }}
+                  >
+                    {executionOutput}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        ) : executionOutput}
         {isRunning && (
           <span
             style={{

@@ -1695,6 +1695,22 @@ fn read_model_workspace_file(
 }
 
 #[tauri::command]
+fn read_binary_file(file_path: String) -> Result<Vec<u8>, String> {
+    let path = PathBuf::from(file_path.trim());
+    if !path.is_absolute() {
+        return Err("Binary file path must be absolute.".to_string());
+    }
+    if !path.exists() {
+        return Err("Binary file does not exist.".to_string());
+    }
+    if !path.is_file() {
+        return Err("Binary path is not a file.".to_string());
+    }
+    std::fs::read(&path)
+        .map_err(|e| format!("Failed to read binary file: {}", e))
+}
+
+#[tauri::command]
 fn write_model_workspace_file(
     model_id: String,
     storage_path: String,
@@ -2548,6 +2564,7 @@ pub fn run() {
             list_downloaded_models,
             list_model_workspace_entries,
             read_model_workspace_file,
+            read_binary_file,
             write_model_workspace_file,
             create_model_workspace_file,
             create_model_workspace_directory,
