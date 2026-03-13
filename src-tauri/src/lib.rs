@@ -1196,6 +1196,9 @@ async fn run_python_code(
     strength: Option<f64>,
     source_image_path: Option<String>,
     mask_image_path: Option<String>,
+    multimodal_task: Option<String>,
+    image_path: Option<String>,
+    document_path: Option<String>,
 ) -> Result<(), String> {
     {
         let lock = handle.execution_pid.lock().unwrap();
@@ -1329,6 +1332,21 @@ async fn run_python_code(
     if let Some(ref value) = mask_image_path {
         if !value.trim().is_empty() {
             command.env("HB_MASK_PATH", value.trim());
+        }
+    }
+    if let Some(ref value) = multimodal_task {
+        if !value.trim().is_empty() {
+            command.env("HB_MULTIMODAL_TASK", value.trim());
+        }
+    }
+    if let Some(ref value) = image_path {
+        if !value.trim().is_empty() {
+            command.env("HB_IMAGE_PATH", value.trim());
+        }
+    }
+    if let Some(ref value) = document_path {
+        if !value.trim().is_empty() {
+            command.env("HB_DOCUMENT_PATH", value.trim());
         }
     }
 
@@ -2649,11 +2667,20 @@ async fn run_model_shell_command(
 
     #[cfg(target_os = "windows")]
     let output = {
-        let script = "$cmd = $env:HB_SHELL_COMMAND; Invoke-Expression $cmd; $hbExit = $LASTEXITCODE; if ($null -eq $hbExit) { $hbExit = 0 }; Write-Output ('__HB_CWD__:' + (Get-Location).Path); exit $hbExit";
+        let script = "$cmd = $env:HB_SHELL_COMMAND; \
+function global:python { & $env:HB_VENV_PYTHON @Args }; \
+function global:pip { & $env:HB_VENV_PYTHON -m pip @Args }; \
+function global:pip3 { & $env:HB_VENV_PYTHON -m pip @Args }; \
+Invoke-Expression $cmd; \
+$hbExit = $LASTEXITCODE; \
+if ($null -eq $hbExit) { $hbExit = 0 }; \
+Write-Output ('__HB_CWD__:' + (Get-Location).Path); \
+exit $hbExit";
         tokio::process::Command::new("powershell")
             .args(["-NoProfile", "-Command", script])
             .env("PATH", &path_with_venv)
             .env("VIRTUAL_ENV", venv_dir.to_string_lossy().to_string())
+            .env("HB_VENV_PYTHON", venv_python.to_string_lossy().to_string())
             .env("HB_SHELL_COMMAND", trimmed)
             .env("HF_TOKEN", hf_token.unwrap_or_default())
             .current_dir(&command_cwd)
@@ -2664,11 +2691,19 @@ async fn run_model_shell_command(
 
     #[cfg(not(target_os = "windows"))]
     let output = {
-        let script = r#"cmd="$HB_SHELL_COMMAND"; eval "$cmd"; hb_ec=$?; printf "__HB_CWD__:%s\n" "$PWD"; exit $hb_ec"#;
+        let script = r#"python() { "$HB_VENV_PYTHON" "$@"; }
+pip() { "$HB_VENV_PYTHON" -m pip "$@"; }
+pip3() { "$HB_VENV_PYTHON" -m pip "$@"; }
+cmd="$HB_SHELL_COMMAND"
+eval "$cmd"
+hb_ec=$?
+printf "__HB_CWD__:%s\n" "$PWD"
+exit $hb_ec"#;
         tokio::process::Command::new("bash")
             .args(["-lc", script])
             .env("PATH", &path_with_venv)
             .env("VIRTUAL_ENV", venv_dir.to_string_lossy().to_string())
+            .env("HB_VENV_PYTHON", venv_python.to_string_lossy().to_string())
             .env("HB_SHELL_COMMAND", trimmed)
             .env("HF_TOKEN", hf_token.unwrap_or_default())
             .current_dir(&command_cwd)

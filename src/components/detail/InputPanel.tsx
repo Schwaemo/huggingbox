@@ -5,6 +5,7 @@ import { Play, Square, Upload } from 'lucide-react';
 import Button from '../shared/Button';
 
 export type DiffusionMode = 'text-to-image' | 'image-to-image' | 'inpainting';
+export type MultimodalTask = 'visual-question-answering' | 'image-captioning' | 'document-understanding';
 
 interface InputPanelProps {
   pipelineTag: string | null | undefined;
@@ -37,6 +38,13 @@ interface InputPanelProps {
   onNumImagesChange?: (value: number) => void;
   strength?: number;
   onStrengthChange?: (value: number) => void;
+  supportsMultimodalModes?: boolean;
+  multimodalTask?: MultimodalTask;
+  onMultimodalTaskChange?: (task: MultimodalTask) => void;
+  multimodalImagePath?: string;
+  onMultimodalImagePathChange?: (path: string) => void;
+  multimodalDocumentPath?: string;
+  onMultimodalDocumentPathChange?: (path: string) => void;
 }
 
 function getInputType(pipeline: string | null | undefined): 'text' | 'image' | 'audio' | 'prompt' {
@@ -313,6 +321,13 @@ export default function InputPanel({
   onNumImagesChange,
   strength = 0.75,
   onStrengthChange,
+  supportsMultimodalModes = false,
+  multimodalTask = 'visual-question-answering',
+  onMultimodalTaskChange,
+  multimodalImagePath = '',
+  onMultimodalImagePathChange,
+  multimodalDocumentPath = '',
+  onMultimodalDocumentPathChange,
 }: InputPanelProps) {
   const fileRef = useRef<HTMLInputElement>(null);
   const inputType = getInputType(pipelineTag);
@@ -326,8 +341,13 @@ export default function InputPanel({
     [pipelineTag]
   );
   const isDiffusion = supportsDiffusionModes;
+  const isMultimodal = supportsMultimodalModes;
   const sourcePreviewUrl = useLocalImagePreview(sourceImagePath);
   const maskPreviewUrl = useLocalImagePreview(maskImagePath);
+  const multimodalImagePreviewUrl = useLocalImagePreview(multimodalImagePath);
+  const multimodalDocumentPreviewUrl = useLocalImagePreview(
+    multimodalDocumentPath.toLowerCase().endsWith('.pdf') ? '' : multimodalDocumentPath
+  );
   const displayInputValue = useMemo(() => {
     if (!inputValue.startsWith('__HBJSON__:')) return inputValue;
     const raw = inputValue.slice('__HBJSON__:'.length);
@@ -357,6 +377,14 @@ export default function InputPanel({
     const normalized = maskImagePath.replace(/\\/g, '/');
     return normalized ? normalized.split('/').pop() ?? normalized : '';
   }, [maskImagePath]);
+  const multimodalImageLabel = useMemo(() => {
+    const normalized = multimodalImagePath.replace(/\\/g, '/');
+    return normalized ? normalized.split('/').pop() ?? normalized : '';
+  }, [multimodalImagePath]);
+  const multimodalDocumentLabel = useMemo(() => {
+    const normalized = multimodalDocumentPath.replace(/\\/g, '/');
+    return normalized ? normalized.split('/').pop() ?? normalized : '';
+  }, [multimodalDocumentPath]);
 
   useEffect(() => {
     if (!isQa || !inputValue.startsWith('__HBJSON__:')) return;
@@ -409,6 +437,18 @@ export default function InputPanel({
     }
   }
 
+  async function handleChooseMultimodalFile(kind: 'image' | 'document') {
+    const selected = await chooseFile(
+      kind === 'image' ? ['png', 'jpg', 'jpeg', 'webp'] : ['png', 'jpg', 'jpeg', 'webp', 'pdf']
+    );
+    if (!selected.trim()) return;
+    if (kind === 'image') {
+      onMultimodalImagePathChange?.(selected);
+    } else {
+      onMultimodalDocumentPathChange?.(selected);
+    }
+  }
+
   function emitTextInput(val: string) {
     if (supportsBatch && batchMode) {
       const items = val
@@ -455,10 +495,124 @@ export default function InputPanel({
             letterSpacing: '0.06em',
           }}
         >
-          {isDiffusion ? 'Prompt' : getInputLabel(pipelineTag)}
+          {isMultimodal ? 'Multimodal Input' : isDiffusion ? 'Prompt' : getInputLabel(pipelineTag)}
         </span>
 
-        {isDiffusion ? (
+        {isMultimodal ? (
+          <>
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '6px',
+                padding: '10px',
+                border: '1px solid var(--border)',
+                borderRadius: '4px',
+                backgroundColor: 'var(--bg-primary)',
+              }}
+            >
+              <span style={sectionLabelStyle}>Multimodal Task</span>
+              {(
+                [
+                  ['visual-question-answering', 'Visual Q&A'],
+                  ['image-captioning', 'Image Captioning'],
+                  ['document-understanding', 'Document Understanding'],
+                ] as Array<[MultimodalTask, string]>
+              ).map(([task, label]) => (
+                <label
+                  key={task}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    fontFamily: '"Inter", sans-serif',
+                    fontSize: '12px',
+                    color: 'var(--text-secondary)',
+                    opacity: isRunning ? 0.6 : 1,
+                  }}
+                >
+                  <input
+                    type="radio"
+                    name="multimodal-task"
+                    checked={multimodalTask === task}
+                    onChange={() => onMultimodalTaskChange?.(task)}
+                    disabled={isRunning}
+                    style={{ accentColor: 'var(--accent-primary)' }}
+                  />
+                  {label}
+                </label>
+              ))}
+            </div>
+
+            {multimodalTask !== 'document-understanding' && (
+              <UploadCard
+                title={multimodalImageLabel ? 'Click to replace image' : 'Click to upload image'}
+                subtitle="PNG, JPG, WebP"
+                fileLabel={multimodalImageLabel}
+                previewUrl={multimodalImagePreviewUrl}
+                onClick={() => {
+                  void handleChooseMultimodalFile('image');
+                }}
+                onDropPath={(path) => onMultimodalImagePathChange?.(path)}
+              />
+            )}
+
+            {multimodalTask === 'document-understanding' && (
+              <UploadCard
+                title={multimodalDocumentLabel ? 'Click to replace document' : 'Click to upload document'}
+                subtitle="PNG, JPG, WebP, PDF"
+                fileLabel={multimodalDocumentLabel}
+                previewUrl={multimodalDocumentPreviewUrl}
+                onClick={() => {
+                  void handleChooseMultimodalFile('document');
+                }}
+                onDropPath={(path) => onMultimodalDocumentPathChange?.(path)}
+              />
+            )}
+
+            {multimodalTask === 'visual-question-answering' && (
+              <textarea
+                value={inputValue}
+                onChange={(e) => onInputChange(e.target.value)}
+                placeholder="Ask a question about the uploaded image..."
+                style={{
+                  minHeight: '110px',
+                  resize: 'vertical',
+                  backgroundColor: 'var(--bg-primary)',
+                  border: '1px solid var(--border)',
+                  borderRadius: '4px',
+                  padding: 'var(--space-sm)',
+                  fontFamily: '"Inter", sans-serif',
+                  fontSize: '13px',
+                  color: 'var(--text-primary)',
+                  outline: 'none',
+                  lineHeight: 1.5,
+                }}
+              />
+            )}
+
+            {multimodalTask === 'document-understanding' && (
+              <textarea
+                value={inputValue}
+                onChange={(e) => onInputChange(e.target.value)}
+                placeholder="Extract the important text and structure from this document."
+                style={{
+                  minHeight: '110px',
+                  resize: 'vertical',
+                  backgroundColor: 'var(--bg-primary)',
+                  border: '1px solid var(--border)',
+                  borderRadius: '4px',
+                  padding: 'var(--space-sm)',
+                  fontFamily: '"Inter", sans-serif',
+                  fontSize: '13px',
+                  color: 'var(--text-primary)',
+                  outline: 'none',
+                  lineHeight: 1.5,
+                }}
+              />
+            )}
+          </>
+        ) : isDiffusion ? (
           <>
             <div
               style={{

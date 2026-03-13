@@ -8,6 +8,9 @@ interface OutputPanelProps {
   modelId: string;
   pipelineTag?: string | null;
   inputValue?: string;
+  multimodalTask?: 'visual-question-answering' | 'image-captioning' | 'document-understanding';
+  multimodalImagePath?: string;
+  multimodalDocumentPath?: string;
 }
 
 interface ShellCommandResult {
@@ -22,7 +25,14 @@ interface GalleryImage {
   url: string;
 }
 
-export default function OutputPanel({ modelId, pipelineTag, inputValue = '' }: OutputPanelProps) {
+export default function OutputPanel({
+  modelId,
+  pipelineTag,
+  inputValue = '',
+  multimodalTask,
+  multimodalImagePath,
+  multimodalDocumentPath,
+}: OutputPanelProps) {
   const executionOutput = useAppStore((s) => s.executionOutput);
   const stderrOutput = useAppStore((s) => s.stderrOutput);
   const executionState = useAppStore((s) => s.executionState);
@@ -37,11 +47,13 @@ export default function OutputPanel({ modelId, pipelineTag, inputValue = '' }: O
   const [stderrOpen, setStderrOpen] = useState(true);
   const [stdoutOpen, setStdoutOpen] = useState(true);
   const [copied, setCopied] = useState(false);
+  const [stderrCopied, setStderrCopied] = useState(false);
   const [terminalInput, setTerminalInput] = useState('');
   const [terminalBusy, setTerminalBusy] = useState(false);
   const [terminalCwd, setTerminalCwd] = useState<string | null>(null);
   const [hasTerminalActivity, setHasTerminalActivity] = useState(false);
   const [audioBlobUrl, setAudioBlobUrl] = useState<string | null>(null);
+  const [referenceImageBlobUrl, setReferenceImageBlobUrl] = useState<string | null>(null);
   const [galleryImages, setGalleryImages] = useState<GalleryImage[]>([]);
   const [selectedPreview, setSelectedPreview] = useState<GalleryImage | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -72,6 +84,10 @@ export default function OutputPanel({ modelId, pipelineTag, inputValue = '' }: O
     if (inputValue.startsWith('data:image/')) return inputValue;
     return '';
   }, [inputValue]);
+  const fallbackReferencePath = useMemo(() => {
+    if (multimodalTask === 'document-understanding') return multimodalDocumentPath?.trim() || '';
+    return multimodalImagePath?.trim() || '';
+  }, [multimodalDocumentPath, multimodalImagePath, multimodalTask]);
 
   function renderStructuredOutput() {
     if (parsed.kind === 'audio_transcript' && parsed.data && typeof parsed.data === 'object') {
@@ -158,6 +174,91 @@ export default function OutputPanel({ modelId, pipelineTag, inputValue = '' }: O
           >
             {audioPath}
           </div>
+        </div>
+      );
+    }
+
+    if (parsed.kind === 'multimodal_text' && parsed.data && typeof parsed.data === 'object') {
+      const payload = parsed.data as { text?: string; referenceImagePath?: string };
+      return (
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: referenceImageBlobUrl ? 'minmax(240px, 340px) 1fr' : '1fr',
+            gap: '12px',
+            alignItems: 'start',
+          }}
+        >
+          {referenceImageBlobUrl && (
+            <img
+              src={referenceImageBlobUrl}
+              alt={payload.referenceImagePath ?? fallbackReferencePath ?? 'Multimodal input'}
+              style={{
+                width: '100%',
+                maxHeight: '320px',
+                objectFit: 'contain',
+                border: '1px solid var(--border)',
+                borderRadius: '6px',
+                backgroundColor: 'var(--bg-secondary)',
+              }}
+            />
+          )}
+          <div
+            style={{
+              fontFamily: '"Inter", sans-serif',
+              fontSize: '14px',
+              color: 'var(--text-primary)',
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+            }}
+          >
+            {payload.text?.trim() || executionOutput}
+          </div>
+        </div>
+      );
+    }
+
+    if (parsed.kind === 'multimodal_json' && parsed.data && typeof parsed.data === 'object') {
+      const payload = parsed.data as { data?: unknown; referenceImagePath?: string };
+      return (
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: referenceImageBlobUrl ? 'minmax(240px, 340px) 1fr' : '1fr',
+            gap: '12px',
+            alignItems: 'start',
+          }}
+        >
+          {referenceImageBlobUrl && (
+            <img
+              src={referenceImageBlobUrl}
+              alt={payload.referenceImagePath ?? fallbackReferencePath ?? 'Multimodal input'}
+              style={{
+                width: '100%',
+                maxHeight: '320px',
+                objectFit: 'contain',
+                border: '1px solid var(--border)',
+                borderRadius: '6px',
+                backgroundColor: 'var(--bg-secondary)',
+              }}
+            />
+          )}
+          <pre
+            style={{
+              margin: 0,
+              padding: '12px',
+              borderRadius: '6px',
+              border: '1px solid var(--border)',
+              backgroundColor: 'var(--bg-secondary)',
+              fontFamily: '"JetBrains Mono", monospace',
+              fontSize: '12px',
+              color: 'var(--text-primary)',
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+            }}
+          >
+            {JSON.stringify(payload.data, null, 2)}
+          </pre>
         </div>
       );
     }
@@ -483,6 +584,62 @@ export default function OutputPanel({ modelId, pipelineTag, inputValue = '' }: O
 
   useEffect(() => {
     let cancelled = false;
+    let nextUrl: string | null = null;
+
+    async function loadReferenceImage(path: string) {
+      try {
+        const bytes = await invoke<number[]>('read_binary_file', { filePath: path });
+        if (cancelled) return;
+        const lower = path.toLowerCase();
+        const type = lower.endsWith('.png')
+          ? 'image/png'
+          : lower.endsWith('.webp')
+            ? 'image/webp'
+            : lower.endsWith('.gif')
+              ? 'image/gif'
+              : 'image/jpeg';
+        nextUrl = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type }));
+        setReferenceImageBlobUrl((previous) => {
+          if (previous) URL.revokeObjectURL(previous);
+          return nextUrl;
+        });
+      } catch {
+        if (!cancelled) {
+          setReferenceImageBlobUrl((previous) => {
+            if (previous) URL.revokeObjectURL(previous);
+            return null;
+          });
+        }
+      }
+    }
+
+    const parsedReferencePath =
+      parsed.kind === 'multimodal_text' && parsed.data && typeof parsed.data === 'object'
+        ? ((parsed.data as { referenceImagePath?: string }).referenceImagePath ?? '')
+        : parsed.kind === 'multimodal_json' && parsed.data && typeof parsed.data === 'object'
+          ? ((parsed.data as { referenceImagePath?: string }).referenceImagePath ?? '')
+          : '';
+    const candidatePath = parsedReferencePath || fallbackReferencePath || '';
+
+    if (candidatePath && !candidatePath.toLowerCase().endsWith('.pdf')) {
+      void loadReferenceImage(candidatePath);
+    } else {
+      setReferenceImageBlobUrl((previous) => {
+        if (previous) URL.revokeObjectURL(previous);
+        return null;
+      });
+    }
+
+    return () => {
+      cancelled = true;
+      if (nextUrl) {
+        URL.revokeObjectURL(nextUrl);
+      }
+    };
+  }, [fallbackReferencePath, parsed.data, parsed.kind]);
+
+  useEffect(() => {
+    let cancelled = false;
 
     async function loadGallery(paths: string[]) {
       const loaded = await Promise.all(
@@ -530,6 +687,12 @@ export default function OutputPanel({ modelId, pipelineTag, inputValue = '' }: O
     navigator.clipboard.writeText(executionOutput).catch(() => {});
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  }
+
+  function handleCopyStderr() {
+    navigator.clipboard.writeText(stderrOutput).catch(() => {});
+    setStderrCopied(true);
+    setTimeout(() => setStderrCopied(false), 2000);
   }
 
   async function handleTerminalRun() {
@@ -893,30 +1056,57 @@ export default function OutputPanel({ modelId, pipelineTag, inputValue = '' }: O
       {/* stderr collapsible section */}
       {hasStderr && (
         <div style={{ flexShrink: 0, borderTop: '1px solid var(--border)' }}>
-          <button
-            onClick={() => setStderrOpen((v) => !v)}
+          <div
             style={{
               display: 'flex',
               alignItems: 'center',
-              gap: '4px',
-              width: '100%',
+              justifyContent: 'space-between',
+              gap: '8px',
               padding: '6px var(--space-md)',
-              background: 'none',
-              border: 'none',
-              cursor: 'pointer',
-              color: 'var(--success)',
-              fontFamily: '"JetBrains Mono", monospace',
-              fontSize: '11px',
-              textTransform: 'uppercase',
-              letterSpacing: '0.06em',
             }}
           >
-            {stderrOpen
-              ? <ChevronDown size={12} strokeWidth={1.5} />
-              : <ChevronRight size={12} strokeWidth={1.5} />
-            }
-            Console
-          </button>
+            <button
+              onClick={() => setStderrOpen((v) => !v)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '4px',
+                flex: 1,
+                minWidth: 0,
+                padding: 0,
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
+                color: 'var(--success)',
+                fontFamily: '"JetBrains Mono", monospace',
+                fontSize: '11px',
+                textTransform: 'uppercase',
+                letterSpacing: '0.06em',
+              }}
+            >
+              {stderrOpen
+                ? <ChevronDown size={12} strokeWidth={1.5} />
+                : <ChevronRight size={12} strokeWidth={1.5} />
+              }
+              Console
+            </button>
+            <button
+              onClick={handleCopyStderr}
+              title="Copy console output"
+              style={{
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
+                color: 'var(--success)',
+                display: 'flex',
+                alignItems: 'center',
+                padding: '2px',
+                borderRadius: '2px',
+              }}
+            >
+              {stderrCopied ? <CheckCheck size={13} strokeWidth={1.5} /> : <Copy size={13} strokeWidth={1.5} />}
+            </button>
+          </div>
           {stderrOpen && (
             <div
               style={{
@@ -930,6 +1120,7 @@ export default function OutputPanel({ modelId, pipelineTag, inputValue = '' }: O
                 whiteSpace: 'pre-wrap',
                 wordBreak: 'break-all',
                 lineHeight: 1.5,
+                userSelect: 'text',
               }}
             >
               {stderrOutput}

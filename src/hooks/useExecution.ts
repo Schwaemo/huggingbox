@@ -143,6 +143,9 @@ function runtimeDependenciesForType(runtimeType: string): string[] {
   if (runtime === 'transformers_audio') {
     return ['transformers', 'accelerate', 'torch', 'librosa', 'soundfile', 'sentencepiece'];
   }
+  if (runtime === 'transformers_multimodal') {
+    return ['transformers', 'accelerate', 'torch', 'torchvision', 'pillow', 'sentencepiece'];
+  }
   if (runtime.startsWith('transformers')) {
     return ['transformers'];
   }
@@ -397,6 +400,9 @@ export function useExecution() {
       strength?: number;
       sourceImagePath?: string;
       maskImagePath?: string;
+      multimodalTask?: 'visual-question-answering' | 'image-captioning' | 'document-understanding';
+      imagePath?: string;
+      documentPath?: string;
     }
   ) => {
     const store = useAppStore.getState();
@@ -538,7 +544,12 @@ export function useExecution() {
 
     if (options?.runMode !== 'direct') {
       const runtimeType = detectRuntimeTypeFromCode(options?.runtimeSourceCode ?? store.generatedCode);
-      const runtimePackages = uniqueDependencies(runtimeDependenciesForType(runtimeType));
+      const runtimePackages = uniqueDependencies([
+        ...runtimeDependenciesForType(runtimeType),
+        ...(runtimeType === 'transformers_multimodal' && options?.multimodalTask === 'document-understanding'
+          ? ['pymupdf']
+          : []),
+      ]);
       if (runtimePackages.length > 0) {
         appendLog(`Detected runtime type: ${runtimeType}`);
         appendLog(`Checking runtime dependencies before probe: ${runtimePackages.join(', ')}`);
@@ -800,6 +811,9 @@ export function useExecution() {
         strength: options?.strength ?? null,
         sourceImagePath: options?.sourceImagePath ?? null,
         maskImagePath: options?.maskImagePath ?? null,
+        multimodalTask: options?.multimodalTask ?? null,
+        imagePath: options?.imagePath ?? null,
+        documentPath: options?.documentPath ?? null,
       });
     } catch (err) {
       stopTimer();

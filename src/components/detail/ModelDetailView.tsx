@@ -21,7 +21,7 @@ import {
 import ModelInfoPanel from './ModelInfoPanel';
 import CodeEditor from './CodeEditor';
 import FileExplorer from './FileExplorer';
-import InputPanel, { type DiffusionMode } from './InputPanel';
+import InputPanel, { type DiffusionMode, type MultimodalTask } from './InputPanel';
 import OutputPanel from './OutputPanel';
 import Button from '../shared/Button';
 import SkeletonCard from '../shared/SkeletonCard';
@@ -358,6 +358,9 @@ function WorkspaceLayout({
   const [seed, setSeed] = useState('');
   const [numImages, setNumImages] = useState(1);
   const [strength, setStrength] = useState(0.75);
+  const [multimodalTask, setMultimodalTask] = useState<MultimodalTask>('visual-question-answering');
+  const [multimodalImagePath, setMultimodalImagePath] = useState('');
+  const [multimodalDocumentPath, setMultimodalDocumentPath] = useState('');
   const [currentDirectory, setCurrentDirectory] = useState('');
   const [workspaceEntries, setWorkspaceEntries] = useState<ModelWorkspaceEntry[]>([]);
   const [workspaceLoading, setWorkspaceLoading] = useState(false);
@@ -377,6 +380,17 @@ function WorkspaceLayout({
     const pipeline = (model.pipeline_tag ?? '').toLowerCase();
     if (['text-to-image', 'image-to-image', 'inpainting'].includes(pipeline)) return true;
     return /(^|\n)\s*#?\s*RUNTIME:\s*diffusers\b/i.test(editorCode);
+  }, [editorCode, model.pipeline_tag]);
+  const supportsMultimodalModes = useMemo(() => {
+    const pipeline = (model.pipeline_tag ?? '').toLowerCase();
+    if (
+      ['image-text-to-text', 'image-to-text', 'visual-question-answering', 'document-question-answering'].includes(
+        pipeline
+      )
+    ) {
+      return true;
+    }
+    return /(^|\n)\s*#?\s*RUNTIME:\s*transformers_multimodal\b/i.test(editorCode);
   }, [editorCode, model.pipeline_tag]);
 
   const isRunning =
@@ -416,6 +430,17 @@ function WorkspaceLayout({
       setDiffusionMode('inpainting');
     } else if (pipeline === 'text-to-image') {
       setDiffusionMode('text-to-image');
+    }
+  }, [model.pipeline_tag, modelId]);
+
+  useEffect(() => {
+    const pipeline = (model.pipeline_tag ?? '').toLowerCase();
+    if (pipeline === 'document-question-answering') {
+      setMultimodalTask('document-understanding');
+    } else if (pipeline === 'image-to-text') {
+      setMultimodalTask('image-captioning');
+    } else {
+      setMultimodalTask('visual-question-answering');
     }
   }, [model.pipeline_tag, modelId]);
 
@@ -649,6 +674,34 @@ function WorkspaceLayout({
 
   async function handleRun() {
     const trimmedInput = inputValue.trim();
+    if (supportsMultimodalModes) {
+      if (multimodalTask === 'visual-question-answering') {
+        if (!multimodalImagePath.trim()) {
+          await messageDialog('Select an image before running visual question answering.', {
+            kind: 'warning',
+          });
+          return;
+        }
+        if (!trimmedInput) {
+          await messageDialog('Enter a question before running visual question answering.', {
+            kind: 'warning',
+          });
+          return;
+        }
+      }
+      if (multimodalTask === 'image-captioning' && !multimodalImagePath.trim()) {
+        await messageDialog('Select an image before running image captioning.', {
+          kind: 'warning',
+        });
+        return;
+      }
+      if (multimodalTask === 'document-understanding' && !multimodalDocumentPath.trim()) {
+        await messageDialog('Select a document image or PDF before running document understanding.', {
+          kind: 'warning',
+        });
+        return;
+      }
+    }
     if (supportsDiffusionModes) {
       if (!trimmedInput) {
         await messageDialog('Enter a prompt before running this diffusion model.', {
@@ -703,6 +756,9 @@ function WorkspaceLayout({
         strength: supportsDiffusionModes ? strength : undefined,
         sourceImagePath: supportsDiffusionModes ? sourceImagePath : undefined,
         maskImagePath: supportsDiffusionModes ? maskImagePath : undefined,
+        multimodalTask: supportsMultimodalModes ? multimodalTask : undefined,
+        imagePath: supportsMultimodalModes ? multimodalImagePath : undefined,
+        documentPath: supportsMultimodalModes ? multimodalDocumentPath : undefined,
       });
     } catch (error) {
       setEditorStatus('Save failed');
@@ -720,6 +776,13 @@ function WorkspaceLayout({
           onInputChange={setInputValue}
           runMode={runMode}
           onRunModeChange={setRunMode}
+          supportsMultimodalModes={supportsMultimodalModes}
+          multimodalTask={multimodalTask}
+          onMultimodalTaskChange={setMultimodalTask}
+          multimodalImagePath={multimodalImagePath}
+          onMultimodalImagePathChange={setMultimodalImagePath}
+          multimodalDocumentPath={multimodalDocumentPath}
+          onMultimodalDocumentPathChange={setMultimodalDocumentPath}
           supportsDiffusionModes={supportsDiffusionModes}
           diffusionMode={diffusionMode}
           onDiffusionModeChange={setDiffusionMode}
@@ -876,6 +939,9 @@ function WorkspaceLayout({
             modelId={modelId}
             pipelineTag={model.pipeline_tag}
             inputValue={inputValue}
+            multimodalTask={supportsMultimodalModes ? multimodalTask : undefined}
+            multimodalImagePath={supportsMultimodalModes ? multimodalImagePath : undefined}
+            multimodalDocumentPath={supportsMultimodalModes ? multimodalDocumentPath : undefined}
           />
         </div>
       </div>

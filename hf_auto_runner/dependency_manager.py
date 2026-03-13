@@ -26,6 +26,7 @@ class DependencyManager:
                 "torch",
                 "torchvision",
                 "pillow",
+                "pymupdf",
                 "sentencepiece",
                 "qwen-vl-utils",
                 "einops",

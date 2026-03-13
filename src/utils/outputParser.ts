@@ -12,7 +12,9 @@ export interface ParsedOutput {
     | 'audio_transcript'
     | 'audio_file'
     | 'image_gallery'
-    | 'diffusion_progress';
+    | 'diffusion_progress'
+    | 'multimodal_text'
+    | 'multimodal_json';
   data: unknown;
 }
 
@@ -104,6 +106,26 @@ function extractDiffusionProgress(text: string): { step: number; totalSteps: num
   return null;
 }
 
+function extractMarkedText(text: string, marker: string): string | null {
+  const matches = Array.from(text.matchAll(new RegExp(`${marker}:(.+)`, 'g')));
+  const last = matches[matches.length - 1];
+  return last?.[1]?.trim() || null;
+}
+
+function extractMarkedJson(text: string, marker: string): unknown | null {
+  const raw = extractMarkedText(text, marker);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    try {
+      return JSON.parse(normalizePseudoJson(raw));
+    } catch {
+      return null;
+    }
+  }
+}
+
 export function parseExecutionOutput(
   rawOutput: string,
   pipelineTag: string | null | undefined
@@ -113,12 +135,33 @@ export function parseExecutionOutput(
   const audioPath = extractAudioOutputPath(rawOutput);
   const imagePaths = extractImageOutputPaths(rawOutput);
   const diffusionProgress = extractDiffusionProgress(rawOutput);
+  const multimodalText = extractMarkedText(rawOutput, 'HB_MULTIMODAL_TEXT');
+  const multimodalJson = extractMarkedJson(rawOutput, 'HB_MULTIMODAL_JSON');
+  const referenceImagePath = extractMarkedText(rawOutput, 'HB_REFERENCE_IMAGE');
 
   if (imagePaths.length > 0) {
     return { kind: 'image_gallery', data: { paths: imagePaths } };
   }
   if (diffusionProgress) {
     return { kind: 'diffusion_progress', data: diffusionProgress };
+  }
+  if (multimodalJson !== null) {
+    return {
+      kind: 'multimodal_json',
+      data: {
+        data: multimodalJson,
+        referenceImagePath: referenceImagePath || undefined,
+      },
+    };
+  }
+  if (multimodalText) {
+    return {
+      kind: 'multimodal_text',
+      data: {
+        text: multimodalText,
+        referenceImagePath: referenceImagePath || undefined,
+      },
+    };
   }
 
   if (

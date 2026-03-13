@@ -25,6 +25,12 @@ class RuntimeRouter:
         architectures = self.config.get("architectures", [])
         arch_string = "".join(architectures).lower()
         diffusion_pipeline_tags = {"text-to-image", "image-to-image", "inpainting"}
+        multimodal_pipeline_tags = {
+            "image-text-to-text",
+            "image-to-text",
+            "visual-question-answering",
+            "document-question-answering",
+        }
         
         if (
             self.pipeline_tag in diffusion_pipeline_tags
@@ -40,9 +46,20 @@ class RuntimeRouter:
 
         # Prioritize multimodal/OCR families before generic CausalLM routing.
         if (
+            self.pipeline_tag in multimodal_pipeline_tags
+            or
             "imagetexttotext" in arch_string
             or "ocr" in arch_string
-            or model_type in ["llava", "qwen2_vl", "paligemma", "glm", "deepseek_vl_v2"]
+            or model_type in [
+                "llava",
+                "qwen2_vl",
+                "qwen_vl",
+                "paligemma",
+                "glm",
+                "deepseek_vl_v2",
+                "internvl",
+                "florence2",
+            ]
         ):
             return "transformers_multimodal"
 

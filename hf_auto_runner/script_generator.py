@@ -212,13 +212,14 @@ num_images = max(1, _read_env_int("HB_NUM_IMAGES", 1))
 strength = max(0.0, min(1.0, _read_env_float("HB_STRENGTH", 0.75)))
 output_dir = os.environ.get("HB_OUTPUT_DIR", "").strip() or os.path.abspath(os.path.join(os.getcwd(), "outputs"))
 device = "cuda" if torch.cuda.is_available() else "cpu"
-torch_dtype = torch.float16 if device == "cuda" else torch.float32
+torch_dtype = torch.float32
 is_sdxl = _is_sdxl_family()
 
 print(f"Loading diffusion runtime for {{model_id}}...", flush=True)
 print(f"Diffusion mode: {{mode}}", flush=True)
 print(f"Diffusion family: {{'SDXL' if is_sdxl else 'SD/compatible'}}", flush=True)
 print(f"Execution device: {{device}}", flush=True)
+print("Diffusion precision: float32", flush=True)
 print(f"Output directory: {{output_dir}}", flush=True)
 
 if not prompt:
@@ -292,7 +293,7 @@ if device == "cuda":
     if _should_upcast_vae(pipe):
         try:
             pipe.upcast_vae()
-            print("Upcast VAE for more reliable decoding on CUDA fp16.", flush=True)
+            print("Upcast VAE for more reliable decoding.", flush=True)
         except Exception as upcast_error:
             print(f"Could not upcast VAE: {{upcast_error}}", flush=True)
 else:
@@ -361,7 +362,7 @@ if all_black and not safety_flagged and device == "cuda" and torch_dtype == torc
 
 if all_black:
     raise RuntimeError(
-        "Generated image is black. Inspect the logs above for safety checker flags or fp16 decode issues."
+        "Generated image is black. Inspect the logs above for safety checker flags or decode issues."
     )
 
 run_prefix = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -379,12 +380,12 @@ print("Diffusion generation completed successfully.", flush=True)
 """
 
     def _multimodal_template(self) -> str:
-        return self._metadata_header() + f"""
-import base64
+        pipeline_tag = (self.metadata.get("pipeline_tag") or "").lower()
+        model_type = (self.metadata.get("config", {}).get("model_type") or "").lower()
+        return self._metadata_header() + "# MULTIMODAL_TASK: auto\n" + f"""
+import json
 import os
-import re
 import tempfile
-import urllib.request
 import uuid
 
 import torch
@@ -392,104 +393,237 @@ from PIL import Image
 from transformers import AutoModelForCausalLM, AutoModelForImageTextToText, AutoProcessor
 
 model_id = "{self.model_id}"
+pipeline_tag = "{pipeline_tag}"
+model_type = "{model_type}"
+architecture_name = "{self.architecture}"
 hf_token = os.environ.get("HF_TOKEN") or None
 device = "cuda" if torch.cuda.is_available() else "cpu"
+torch_dtype = torch.float16 if device == "cuda" else torch.float32
 
-print(f"Loading multimodal model {{model_id}}...")
 
-try:
-    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True, token=hf_token)
-    model = None
+def _default_task() -> str:
+    requested = (os.environ.get("HB_MULTIMODAL_TASK") or "").strip().lower()
+    if requested in ("visual-question-answering", "image-captioning", "document-understanding"):
+        return requested
+    if pipeline_tag in ("image-to-text", "image-text-to-text"):
+        return "image-captioning"
+    if pipeline_tag == "document-question-answering" or "ocr" in architecture_name.lower():
+        return "document-understanding"
+    return "visual-question-answering"
+
+
+def _family() -> str:
+    haystack = " ".join([model_id.lower(), model_type.lower(), architecture_name.lower()])
+    if "florence" in haystack:
+        return "florence"
+    if "qwen2_vl" in haystack or "qwen-vl" in haystack or "qwen2-vl" in haystack:
+        return "qwen_vl"
+    if "llava" in haystack:
+        return "llava"
+    if "internvl" in haystack:
+        return "internvl"
+    if "paligemma" in haystack:
+        return "paligemma"
+    if "ocr" in haystack or pipeline_tag == "document-question-answering":
+        return "ocr"
+    return "generic"
+
+
+def _require_existing_file(path: str, label: str) -> str:
+    if not path:
+        raise RuntimeError(f"{{label}} path is required.")
+    if not os.path.isfile(path):
+        raise RuntimeError(f"{{label}} file not found: {{path}}")
+    return path
+
+
+def _prepare_document_path(path: str) -> str:
+    source = _require_existing_file(path, "Document")
+    lower = source.lower()
+    if not lower.endswith(".pdf"):
+        return source
+
+    print(f"Rasterizing first PDF page: {{source}}", flush=True)
     try:
-        model = AutoModelForImageTextToText.from_pretrained(
-            model_id,
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-            trust_remote_code=True,
-            token=hf_token
-        ).to(device)
-        print("Loaded model via AutoModelForImageTextToText.")
-    except Exception as model_load_error:
-        print(f"AutoModelForImageTextToText failed, falling back to AutoModelForCausalLM: {{model_load_error}}")
-        model = AutoModelForCausalLM.from_pretrained(
-            model_id,
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-            trust_remote_code=True,
-            token=hf_token
-        ).to(device)
-        print("Loaded model via AutoModelForCausalLM.")
+        import fitz
+    except Exception as fitz_error:
+        raise RuntimeError(f"PyMuPDF is required for PDF document support: {{fitz_error}}")
 
-    runtime_input_dir = os.path.join(tempfile.gettempdir(), "huggingbox_inputs")
-    os.makedirs(runtime_input_dir, exist_ok=True)
-    run_suffix = uuid.uuid4().hex[:8]
+    runtime_dir = os.path.join(tempfile.gettempdir(), "huggingbox_inputs")
+    os.makedirs(runtime_dir, exist_ok=True)
+    out_path = os.path.join(runtime_dir, f"pdf_page_{{uuid.uuid4().hex[:8]}}.png")
 
-    user_input = os.environ.get("HB_INPUT", "").strip()
-    if user_input.startswith("__HBIMG__:"):
-        user_input = user_input[len("__HBIMG__:"):].strip()
-
-    if user_input and os.path.isfile(user_input):
-        img_path = user_input
-        print(f"Using provided image: {{img_path}}")
-    elif user_input and user_input.startswith("data:image/"):
-        match = re.match(r"^data:image/([^;]+);base64,(.+)$", user_input, flags=re.DOTALL)
-        if not match:
-            raise RuntimeError("Invalid image data URL format in HB_INPUT.")
-        ext = match.group(1).lower().replace("jpeg", "jpg")
-        payload = match.group(2)
-        img_path = os.path.join(runtime_input_dir, f"user_input_{{run_suffix}}.{{ext}}")
-        with open(img_path, "wb") as f:
-            f.write(base64.b64decode(payload))
-        print(f"Decoded image input to: {{img_path}}")
-    elif user_input and (user_input.startswith("http://") or user_input.startswith("https://")):
-        img_path = os.path.join(runtime_input_dir, f"downloaded_input_{{run_suffix}}.jpg")
-        print("Downloading user image from URL...")
-        urllib.request.urlretrieve(user_input, img_path)
-    else:
-        img_path = os.path.join(runtime_input_dir, "sample_image.jpg")
-        if not os.path.exists(img_path):
-            print("No input provided -> downloading sample image...")
-            urllib.request.urlretrieve("https://picsum.photos/id/237/500/500", img_path)
-        else:
-            print("Using cached sample image.")
-
-    image = Image.open(img_path).convert("RGB")
-    prompt = "Describe this image in detail."
-
-    messages = [
-        {{"role": "user", "content": [
-            {{"type": "image", "image": img_path}},
-            {{"type": "text", "text": prompt}}
-        ]}}
-    ]
-
+    doc = fitz.open(source)
     try:
-        text = processor.apply_chat_template(messages, add_generation_prompt=True)
-        inputs = processor(images=image, text=text, return_tensors="pt").to(device)
+        if doc.page_count < 1:
+            raise RuntimeError("PDF has no pages.")
+        page = doc.load_page(0)
+        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+        pix.save(out_path)
+    finally:
+        doc.close()
+
+    print(f"Rasterized first page to: {{out_path}}", flush=True)
+    return out_path
+
+
+def _resolve_reference_image(task: str) -> str:
+    image_path = (os.environ.get("HB_IMAGE_PATH") or "").strip()
+    document_path = (os.environ.get("HB_DOCUMENT_PATH") or "").strip()
+    if task == "document-understanding":
+        return _prepare_document_path(document_path)
+    return _require_existing_file(image_path, "Image")
+
+
+def _prompt_for_task(task: str) -> str:
+    text = (os.environ.get("HB_INPUT") or "").strip()
+    if task == "visual-question-answering":
+        if not text:
+            raise RuntimeError("Visual question answering requires a question in HB_INPUT.")
+        return text
+    if task == "image-captioning":
+        return "Describe this image in detail."
+    if task == "document-understanding":
+        return text or "Extract the important text and structure from this document."
+    raise RuntimeError(f"Unsupported multimodal task: {{task}}")
+
+
+def _maybe_json(text: str):
+    trimmed = text.strip()
+    if not trimmed:
+        return None
+    try:
+        return json.loads(trimmed)
     except Exception:
-        inputs = processor(images=image, text=f"<image>\\n{{prompt}}", return_tensors="pt").to(device)
+        return None
 
-    print("Generating...")
-    outputs = model.generate(**inputs, max_new_tokens=128)
 
+def _to_device(batch):
+    if isinstance(batch, dict):
+        return {{k: v.to(device) if hasattr(v, "to") else v for k, v in batch.items()}}
+    if hasattr(batch, "to"):
+        return batch.to(device)
+    return batch
+
+
+def _decode_generated(processor, outputs, inputs) -> str:
     input_ids = None
     if isinstance(inputs, dict):
         input_ids = inputs.get("input_ids")
     elif hasattr(inputs, "input_ids"):
         input_ids = inputs.input_ids
 
+    generated_ids = outputs[0]
     if input_ids is not None and hasattr(input_ids, "shape") and len(input_ids.shape) > 1:
         input_len = input_ids.shape[1]
-        generated_ids = outputs[0][input_len:] if outputs.shape[1] > input_len else outputs[0]
-    else:
-        generated_ids = outputs[0]
-    text = processor.decode(generated_ids, skip_special_tokens=True)
+        if outputs.shape[1] > input_len:
+            generated_ids = outputs[0][input_len:]
 
-    print("\\nOUTPUT:")
-    print("="*40)
-    print(text)
-    print("="*40)
+    if hasattr(processor, "decode"):
+        return processor.decode(generated_ids, skip_special_tokens=True)
+    tokenizer = getattr(processor, "tokenizer", None)
+    if tokenizer and hasattr(tokenizer, "decode"):
+        return tokenizer.decode(generated_ids, skip_special_tokens=True)
+    return str(generated_ids)
+
+
+def _florence_prompt(task: str, prompt: str) -> str:
+    if task == "image-captioning":
+        return "<MORE_DETAILED_CAPTION>"
+    if task == "visual-question-answering":
+        return f"<VQA>{{prompt}}"
+    return "<OCR>"
+
+
+def _prepare_inputs(processor, image, task: str, prompt: str, family: str, image_path: str):
+    print(f"Preparing multimodal inputs for family={{family}}, task={{task}}", flush=True)
+
+    if family == "florence":
+        text = _florence_prompt(task, prompt)
+        print(f"Florence prompt: {{text}}", flush=True)
+        return _to_device(processor(text=text, images=image, return_tensors="pt"))
+
+    if family in ("llava", "qwen_vl", "internvl", "paligemma", "generic"):
+        messages = [
+            {{
+                "role": "user",
+                "content": [
+                    {{"type": "image", "image": image_path}},
+                    {{"type": "text", "text": prompt}},
+                ],
+            }}
+        ]
+        try:
+            chat_text = processor.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            print("Using processor chat template.", flush=True)
+            return _to_device(processor(images=image, text=chat_text, return_tensors="pt"))
+        except Exception as chat_error:
+            print(f"Chat template unavailable; falling back to processor(images, text): {{chat_error}}", flush=True)
+            return _to_device(processor(images=image, text=prompt, return_tensors="pt"))
+
+    if family == "ocr":
+        return _to_device(processor(images=image, text=prompt, return_tensors="pt"))
+
+    return _to_device(processor(images=image, text=prompt, return_tensors="pt"))
+
+
+print(f"Loading multimodal model {{model_id}}...", flush=True)
+task = _default_task()
+family = _family()
+print(f"Selected multimodal task: {{task}}", flush=True)
+print(f"Detected multimodal family: {{family}}", flush=True)
+print(f"Execution device: {{device}}", flush=True)
+
+reference_image_path = _resolve_reference_image(task)
+prompt = _prompt_for_task(task)
+print(f"HB_REFERENCE_IMAGE:{{reference_image_path}}", flush=True)
+print(f"Reference image resolved to: {{reference_image_path}}", flush=True)
+print(f"Effective prompt: {{prompt}}", flush=True)
+
+try:
+    print("Loading processor...", flush=True)
+    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True, token=hf_token)
+
+    print("Loading multimodal model weights...", flush=True)
+    try:
+        model = AutoModelForImageTextToText.from_pretrained(
+            model_id,
+            torch_dtype=torch_dtype,
+            trust_remote_code=True,
+            token=hf_token,
+        ).to(device)
+        print("Loaded model via AutoModelForImageTextToText.", flush=True)
+    except Exception as model_load_error:
+        print(f"AutoModelForImageTextToText failed; retrying AutoModelForCausalLM: {{model_load_error}}", flush=True)
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            torch_dtype=torch_dtype,
+            trust_remote_code=True,
+            token=hf_token,
+        ).to(device)
+        print("Loaded model via AutoModelForCausalLM.", flush=True)
+
+    print("Opening reference image...", flush=True)
+    image = Image.open(reference_image_path).convert("RGB")
+    inputs = _prepare_inputs(processor, image, task, prompt, family, reference_image_path)
+
+    print("Running multimodal generation...", flush=True)
+    outputs = model.generate(**inputs, max_new_tokens=512)
+    text = _decode_generated(processor, outputs, inputs).strip()
+    print(f"Decoded output length: {{len(text)}}", flush=True)
+
+    json_payload = _maybe_json(text) if task == "document-understanding" else None
+    if json_payload is not None:
+        print("HB_MULTIMODAL_JSON:" + json.dumps(json_payload, ensure_ascii=False), flush=True)
+    else:
+        print("HB_MULTIMODAL_TEXT:" + text, flush=True)
 
 except Exception as e:
-    print(f"Failed to execute multimodal script: {{e}}")
+    print(f"Failed to execute multimodal script: {{e}}", file=sys.stderr, flush=True)
     raise
 """
 
