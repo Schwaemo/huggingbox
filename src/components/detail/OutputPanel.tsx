@@ -17,6 +17,11 @@ interface ShellCommandResult {
   cwd: string;
 }
 
+interface GalleryImage {
+  path: string;
+  url: string;
+}
+
 export default function OutputPanel({ modelId, pipelineTag, inputValue = '' }: OutputPanelProps) {
   const executionOutput = useAppStore((s) => s.executionOutput);
   const stderrOutput = useAppStore((s) => s.stderrOutput);
@@ -37,6 +42,8 @@ export default function OutputPanel({ modelId, pipelineTag, inputValue = '' }: O
   const [terminalCwd, setTerminalCwd] = useState<string | null>(null);
   const [hasTerminalActivity, setHasTerminalActivity] = useState(false);
   const [audioBlobUrl, setAudioBlobUrl] = useState<string | null>(null);
+  const [galleryImages, setGalleryImages] = useState<GalleryImage[]>([]);
+  const [selectedPreview, setSelectedPreview] = useState<GalleryImage | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const isRunning = executionState === 'running' || executionState === 'installing';
@@ -46,6 +53,19 @@ export default function OutputPanel({ modelId, pipelineTag, inputValue = '' }: O
       ? activeExecutionEnvModelId
       : modelId;
   const parsed = parseExecutionOutput(executionOutput, pipelineTag);
+  const galleryPaths = useMemo(() => {
+    if (
+      parsed.kind === 'image_gallery' &&
+      parsed.data &&
+      typeof parsed.data === 'object' &&
+      Array.isArray((parsed.data as { paths?: unknown }).paths)
+    ) {
+      return ((parsed.data as { paths: unknown[] }).paths)
+        .filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+    }
+    return [];
+  }, [parsed]);
+  const galleryPathsKey = useMemo(() => galleryPaths.join('|'), [galleryPaths]);
   const structuredOutput = renderStructuredOutput();
   const imageSource = useMemo(() => {
     if (inputValue.startsWith('__HBIMG__:')) return inputValue.slice('__HBIMG__:'.length);
@@ -137,6 +157,110 @@ export default function OutputPanel({ modelId, pipelineTag, inputValue = '' }: O
             }}
           >
             {audioPath}
+          </div>
+        </div>
+      );
+    }
+
+    if (
+      parsed.kind === 'diffusion_progress' &&
+      parsed.data &&
+      typeof parsed.data === 'object' &&
+      'percent' in parsed.data
+    ) {
+      const progress = parsed.data as { step: number; totalSteps: number; percent: number };
+      const percent = Math.max(0, Math.min(100, progress.percent));
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          <div
+            style={{
+              fontFamily: '"JetBrains Mono", monospace',
+              fontSize: '12px',
+              color: 'var(--text-secondary)',
+            }}
+          >
+            Diffusion progress: step {progress.step} / {progress.totalSteps} ({percent.toFixed(1)}%)
+          </div>
+          <div
+            style={{
+              width: '100%',
+              height: '10px',
+              borderRadius: '999px',
+              backgroundColor: 'var(--bg-tertiary)',
+              overflow: 'hidden',
+            }}
+          >
+            <div
+              style={{
+                width: `${percent}%`,
+                height: '100%',
+                backgroundColor: 'var(--accent-primary)',
+                transition: 'width 200ms linear',
+              }}
+            />
+          </div>
+        </div>
+      );
+    }
+
+    if (parsed.kind === 'image_gallery' && Array.isArray(galleryImages) && galleryImages.length > 0) {
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          <div
+            style={{
+              fontFamily: '"JetBrains Mono", monospace',
+              fontSize: '12px',
+              color: 'var(--text-secondary)',
+            }}
+          >
+            Generated {galleryImages.length} image{galleryImages.length === 1 ? '' : 's'}
+          </div>
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+              gap: '12px',
+            }}
+          >
+            {galleryImages.map((image) => (
+              <button
+                key={image.path}
+                onClick={() => setSelectedPreview(image)}
+                style={{
+                  border: '1px solid var(--border)',
+                  borderRadius: '6px',
+                  backgroundColor: 'var(--bg-secondary)',
+                  padding: '8px',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '8px',
+                  textAlign: 'left',
+                }}
+              >
+                <img
+                  src={image.url}
+                  alt={image.path}
+                  style={{
+                    width: '100%',
+                    height: '180px',
+                    objectFit: 'contain',
+                    borderRadius: '4px',
+                    backgroundColor: 'var(--bg-primary)',
+                  }}
+                />
+                <span
+                  style={{
+                    fontFamily: '"JetBrains Mono", monospace',
+                    fontSize: '11px',
+                    color: 'var(--text-muted)',
+                    wordBreak: 'break-all',
+                  }}
+                >
+                  {image.path}
+                </span>
+              </button>
+            ))}
           </div>
         </div>
       );
@@ -356,6 +480,51 @@ export default function OutputPanel({ modelId, pipelineTag, inputValue = '' }: O
       }
     };
   }, [parsed.kind, parsed.data]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadGallery(paths: string[]) {
+      const loaded = await Promise.all(
+        paths.map(async (path) => {
+          const bytes = await invoke<number[]>('read_binary_file', { filePath: path });
+          const lower = path.toLowerCase();
+          const type = lower.endsWith('.png')
+            ? 'image/png'
+            : lower.endsWith('.webp')
+              ? 'image/webp'
+              : lower.endsWith('.gif')
+                ? 'image/gif'
+                : 'image/jpeg';
+          const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type }));
+          return { path, url };
+        })
+      );
+
+      if (!cancelled) {
+        setGalleryImages((previous) => {
+          previous.forEach((image) => URL.revokeObjectURL(image.url));
+          return loaded;
+        });
+      } else {
+        loaded.forEach((image) => URL.revokeObjectURL(image.url));
+      }
+    }
+
+    if (galleryPaths.length > 0) {
+      void loadGallery(galleryPaths);
+    } else {
+      setGalleryImages((previous) => {
+        previous.forEach((image) => URL.revokeObjectURL(image.url));
+        return [];
+      });
+      setSelectedPreview(null);
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [galleryPathsKey]);
 
   function handleCopy() {
     navigator.clipboard.writeText(executionOutput).catch(() => {});
@@ -766,6 +935,53 @@ export default function OutputPanel({ modelId, pipelineTag, inputValue = '' }: O
               {stderrOutput}
             </div>
           )}
+        </div>
+      )}
+
+      {selectedPreview && (
+        <div
+          onClick={() => setSelectedPreview(null)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            backgroundColor: 'rgba(5, 8, 20, 0.82)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '24px',
+            zIndex: 1000,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              maxWidth: '92vw',
+              maxHeight: '92vh',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '10px',
+              backgroundColor: 'var(--bg-secondary)',
+              border: '1px solid var(--border)',
+              borderRadius: '8px',
+              padding: '12px',
+            }}
+          >
+            <img
+              src={selectedPreview.url}
+              alt={selectedPreview.path}
+              style={{ maxWidth: '88vw', maxHeight: '82vh', objectFit: 'contain' }}
+            />
+            <div
+              style={{
+                fontFamily: '"JetBrains Mono", monospace',
+                fontSize: '11px',
+                color: 'var(--text-muted)',
+                wordBreak: 'break-all',
+              }}
+            >
+              {selectedPreview.path}
+            </div>
+          </div>
         </div>
       )}
     </div>

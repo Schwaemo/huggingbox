@@ -21,7 +21,7 @@ import {
 import ModelInfoPanel from './ModelInfoPanel';
 import CodeEditor from './CodeEditor';
 import FileExplorer from './FileExplorer';
-import InputPanel from './InputPanel';
+import InputPanel, { type DiffusionMode } from './InputPanel';
 import OutputPanel from './OutputPanel';
 import Button from '../shared/Button';
 import SkeletonCard from '../shared/SkeletonCard';
@@ -349,6 +349,15 @@ function WorkspaceLayout({
 }: WorkspaceLayoutProps) {
   const [inputValue, setInputValue] = useState('');
   const [runMode, setRunMode] = useState<'prepared' | 'direct'>('prepared');
+  const [diffusionMode, setDiffusionMode] = useState<DiffusionMode>('text-to-image');
+  const [sourceImagePath, setSourceImagePath] = useState('');
+  const [maskImagePath, setMaskImagePath] = useState('');
+  const [negativePrompt, setNegativePrompt] = useState('');
+  const [steps, setSteps] = useState(30);
+  const [guidanceScale, setGuidanceScale] = useState(7.5);
+  const [seed, setSeed] = useState('');
+  const [numImages, setNumImages] = useState(1);
+  const [strength, setStrength] = useState(0.75);
   const [currentDirectory, setCurrentDirectory] = useState('');
   const [workspaceEntries, setWorkspaceEntries] = useState<ModelWorkspaceEntry[]>([]);
   const [workspaceLoading, setWorkspaceLoading] = useState(false);
@@ -358,11 +367,17 @@ function WorkspaceLayout({
   const [editorStatus, setEditorStatus] = useState('Python');
   const initialCodeRef = useRef(code);
   const skipNextAutosaveRef = useRef(true);
+  const previousExecutionStateRef = useRef(executionState);
   const settings = useAppStore((s) => s.settings);
   const setGeneratedCode = useAppStore((s) => s.setGeneratedCode);
   const setCodeSource = useAppStore((s) => s.setCodeSource);
   const { runCode, cancelExecution } = useExecution();
   const modelId = useMemo(() => model.modelId ?? model.id, [model.id, model.modelId]);
+  const supportsDiffusionModes = useMemo(() => {
+    const pipeline = (model.pipeline_tag ?? '').toLowerCase();
+    if (['text-to-image', 'image-to-image', 'inpainting'].includes(pipeline)) return true;
+    return /(^|\n)\s*#?\s*RUNTIME:\s*diffusers\b/i.test(editorCode);
+  }, [editorCode, model.pipeline_tag]);
 
   const isRunning =
     executionState === 'running' ||
@@ -386,6 +401,23 @@ function WorkspaceLayout({
   useEffect(() => {
     initialCodeRef.current = code;
   }, [code, modelId]);
+
+  useEffect(() => {
+    if (code === editorCode) return;
+    setEditorCode(code);
+    skipNextAutosaveRef.current = true;
+  }, [code]);
+
+  useEffect(() => {
+    const pipeline = (model.pipeline_tag ?? '').toLowerCase();
+    if (pipeline === 'image-to-image') {
+      setDiffusionMode('image-to-image');
+    } else if (pipeline === 'inpainting') {
+      setDiffusionMode('inpainting');
+    } else if (pipeline === 'text-to-image') {
+      setDiffusionMode('text-to-image');
+    }
+  }, [model.pipeline_tag, modelId]);
 
   function normalizeRelativePath(input: string): string {
     return input
@@ -418,6 +450,22 @@ function WorkspaceLayout({
     },
     [modelId, settings.modelStoragePath]
   );
+
+  useEffect(() => {
+    const previous = previousExecutionStateRef.current;
+    previousExecutionStateRef.current = executionState;
+    if (
+      previous === executionState ||
+      !['running', 'installing', 'downloading'].includes(previous) ||
+      !['completed', 'error', 'cancelled'].includes(executionState)
+    ) {
+      return;
+    }
+
+    void refreshWorkspaceEntries(currentDirectory).catch(() => {
+      // leave the current explorer state alone if refresh fails
+    });
+  }, [currentDirectory, executionState, refreshWorkspaceEntries]);
 
   const openWorkspaceFile = useCallback(
     async (relativePath: string) => {
@@ -601,6 +649,26 @@ function WorkspaceLayout({
 
   async function handleRun() {
     const trimmedInput = inputValue.trim();
+    if (supportsDiffusionModes) {
+      if (!trimmedInput) {
+        await messageDialog('Enter a prompt before running this diffusion model.', {
+          kind: 'warning',
+        });
+        return;
+      }
+      if ((diffusionMode === 'image-to-image' || diffusionMode === 'inpainting') && !sourceImagePath.trim()) {
+        await messageDialog('Select a source image before running this diffusion mode.', {
+          kind: 'warning',
+        });
+        return;
+      }
+      if (diffusionMode === 'inpainting' && !maskImagePath.trim()) {
+        await messageDialog('Select a mask image before running inpainting.', {
+          kind: 'warning',
+        });
+        return;
+      }
+    }
     if (
       ['automatic-speech-recognition', 'audio-classification'].includes(model.pipeline_tag ?? '') &&
       !trimmedInput
@@ -625,6 +693,16 @@ function WorkspaceLayout({
         scriptRelativePath,
         runtimeSourceCode: editorCode,
         runMode,
+        diffusionMode: supportsDiffusionModes ? diffusionMode : undefined,
+        outputDir: supportsDiffusionModes ? 'outputs' : undefined,
+        negativePrompt: supportsDiffusionModes ? negativePrompt : undefined,
+        steps: supportsDiffusionModes ? steps : undefined,
+        guidanceScale: supportsDiffusionModes ? guidanceScale : undefined,
+        seed: supportsDiffusionModes ? seed : undefined,
+        numImages: supportsDiffusionModes ? numImages : undefined,
+        strength: supportsDiffusionModes ? strength : undefined,
+        sourceImagePath: supportsDiffusionModes ? sourceImagePath : undefined,
+        maskImagePath: supportsDiffusionModes ? maskImagePath : undefined,
       });
     } catch (error) {
       setEditorStatus('Save failed');
@@ -642,6 +720,25 @@ function WorkspaceLayout({
           onInputChange={setInputValue}
           runMode={runMode}
           onRunModeChange={setRunMode}
+          supportsDiffusionModes={supportsDiffusionModes}
+          diffusionMode={diffusionMode}
+          onDiffusionModeChange={setDiffusionMode}
+          sourceImagePath={sourceImagePath}
+          onSourceImagePathChange={setSourceImagePath}
+          maskImagePath={maskImagePath}
+          onMaskImagePathChange={setMaskImagePath}
+          negativePrompt={negativePrompt}
+          onNegativePromptChange={setNegativePrompt}
+          steps={steps}
+          onStepsChange={setSteps}
+          guidanceScale={guidanceScale}
+          onGuidanceScaleChange={setGuidanceScale}
+          seed={seed}
+          onSeedChange={setSeed}
+          numImages={numImages}
+          onNumImagesChange={setNumImages}
+          strength={strength}
+          onStrengthChange={setStrength}
           onRun={handleRun}
           onCancel={cancelExecution}
           isRunning={isRunning}

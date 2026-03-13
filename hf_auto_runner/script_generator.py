@@ -79,36 +79,303 @@ print("="*40)
 """
 
     def _diffusers_template(self) -> str:
+        pipeline_tag = (self.metadata.get("pipeline_tag") or "").lower()
+        model_type = (self.metadata.get("config", {}).get("model_type") or "").lower()
         return self._metadata_header() + f"""
+import json
 import os
+from datetime import datetime
+
 import torch
-from diffusers import DiffusionPipeline
+from PIL import Image
+from PIL import ImageStat
+from diffusers import (
+    StableDiffusionImg2ImgPipeline,
+    StableDiffusionInpaintPipeline,
+    StableDiffusionPipeline,
+    StableDiffusionXLImg2ImgPipeline,
+    StableDiffusionXLInpaintPipeline,
+    StableDiffusionXLPipeline,
+)
 
 model_id = "{self.model_id}"
+pipeline_tag = "{pipeline_tag}"
+model_type = "{model_type}"
+architecture_name = "{self.architecture}"
 hf_token = os.environ.get("HF_TOKEN") or None
 
-print(f"Loading diffusion model {{model_id}}...")
-try:
-    pipe = DiffusionPipeline.from_pretrained(
-        model_id,
-        torch_dtype=torch.float16,
-        use_safetensors=True,
-        token=hf_token
+
+def _read_env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    return float(raw)
+
+
+def _read_env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    return int(raw)
+
+
+def _determine_mode() -> str:
+    requested = (os.environ.get("HB_DIFFUSION_MODE") or pipeline_tag or "text-to-image").strip().lower()
+    if requested in ("text-to-image", "image-to-image", "inpainting"):
+        return requested
+    return "text-to-image"
+
+
+def _is_sdxl_family() -> bool:
+    haystack = " ".join([model_id.lower(), model_type.lower(), architecture_name.lower()])
+    return any(token in haystack for token in [
+        "sdxl",
+        "stable-diffusion-xl",
+        "stable diffusion xl",
+        "xl-base",
+        "xl-refiner",
+    ])
+
+
+def _load_image(path: str, label: str) -> Image.Image:
+    if not path:
+        raise RuntimeError(f"{{label}} path is required.")
+    if not os.path.isfile(path):
+        raise RuntimeError(f"{{label}} file not found: {{path}}")
+    print(f"Loading {{label}}: {{path}}", flush=True)
+    return Image.open(path).convert("RGB")
+
+
+def _is_black_image(image: Image.Image, threshold: float = 2.0) -> bool:
+    grayscale = image.convert("L")
+    stat = ImageStat.Stat(grayscale)
+    max_pixel = stat.extrema[0][1] if stat.extrema else 0
+    mean_pixel = stat.mean[0] if stat.mean else 0.0
+    print(
+        f"Image brightness stats -> max={{max_pixel}}, mean={{mean_pixel:.3f}}",
+        flush=True,
     )
-    pipe = pipe.to("cuda" if torch.cuda.is_available() else "cpu")
+    return max_pixel <= threshold and mean_pixel <= threshold
 
-    user_input = os.environ.get("HB_INPUT", "").strip()
-    prompt = user_input if user_input else "A beautiful sunset over a cyberpunk city"
 
-    print(f"Generating image for prompt: '{{prompt}}'")
-    image = pipe(prompt, num_inference_steps=20).images[0]
-    out_path = os.path.abspath("output.png")
+def _log_safety_flags(result) -> bool:
+    flags = getattr(result, "nsfw_content_detected", None)
+    if flags is None:
+        print("Safety checker flags: unavailable", flush=True)
+        return False
+
+    try:
+        flagged = any(bool(item) for item in flags)
+    except Exception:
+        flagged = bool(flags)
+
+    print(f"Safety checker flags: {{flags}}", flush=True)
+    if flagged:
+        print(
+            "Safety checker appears to have replaced one or more outputs. This commonly produces black images.",
+            flush=True,
+        )
+    return flagged
+
+
+def _run_pipe(pipe, kwargs):
+    print("Starting diffusion inference...", flush=True)
+    try:
+        return pipe(**kwargs)
+    except TypeError as callback_error:
+        print(f"Pipeline callback signature rejected, retrying without callback: {{callback_error}}", flush=True)
+        fallback_kwargs = dict(kwargs)
+        fallback_kwargs.pop("callback", None)
+        fallback_kwargs.pop("callback_steps", None)
+        return pipe(**fallback_kwargs)
+
+
+def _should_upcast_vae(pipe) -> bool:
+    vae = getattr(pipe, "vae", None)
+    if vae is None:
+        return False
+    if getattr(vae, "dtype", None) != torch.float16:
+        return False
+    config = getattr(vae, "config", None)
+    return bool(getattr(config, "force_upcast", False)) or "xl" in pipe.__class__.__name__.lower()
+
+
+mode = _determine_mode()
+prompt = os.environ.get("HB_INPUT", "").strip()
+negative_prompt = os.environ.get("HB_NEGATIVE_PROMPT", "").strip()
+source_image_path = os.environ.get("HB_SOURCE_IMAGE", "").strip()
+mask_path = os.environ.get("HB_MASK_PATH", "").strip()
+steps = max(1, _read_env_int("HB_STEPS", 30))
+guidance_scale = _read_env_float("HB_GUIDANCE_SCALE", 7.5)
+seed_text = os.environ.get("HB_SEED", "").strip()
+num_images = max(1, _read_env_int("HB_NUM_IMAGES", 1))
+strength = max(0.0, min(1.0, _read_env_float("HB_STRENGTH", 0.75)))
+output_dir = os.environ.get("HB_OUTPUT_DIR", "").strip() or os.path.abspath(os.path.join(os.getcwd(), "outputs"))
+device = "cuda" if torch.cuda.is_available() else "cpu"
+torch_dtype = torch.float16 if device == "cuda" else torch.float32
+is_sdxl = _is_sdxl_family()
+
+print(f"Loading diffusion runtime for {{model_id}}...", flush=True)
+print(f"Diffusion mode: {{mode}}", flush=True)
+print(f"Diffusion family: {{'SDXL' if is_sdxl else 'SD/compatible'}}", flush=True)
+print(f"Execution device: {{device}}", flush=True)
+print(f"Output directory: {{output_dir}}", flush=True)
+
+if not prompt:
+    raise RuntimeError("Diffusion generation requires a prompt in HB_INPUT.")
+
+if mode in ("image-to-image", "inpainting") and not source_image_path:
+    raise RuntimeError("Source image is required in HB_SOURCE_IMAGE for image-to-image and inpainting.")
+
+if mode == "inpainting" and not mask_path:
+    raise RuntimeError("Mask image is required in HB_MASK_PATH for inpainting.")
+
+os.makedirs(output_dir, exist_ok=True)
+
+source_image = _load_image(source_image_path, "source image") if source_image_path else None
+mask_image = _load_image(mask_path, "mask image") if mask_path else None
+
+generator = None
+if seed_text:
+    seed_value = int(seed_text)
+    generator = torch.Generator(device="cuda" if device == "cuda" else "cpu").manual_seed(seed_value)
+    print(f"Using manual seed: {{seed_value}}", flush=True)
+else:
+    print("Using random seed.", flush=True)
+
+if mode == "text-to-image":
+    pipeline_cls = StableDiffusionXLPipeline if is_sdxl else StableDiffusionPipeline
+elif mode == "image-to-image":
+    pipeline_cls = StableDiffusionXLImg2ImgPipeline if is_sdxl else StableDiffusionImg2ImgPipeline
+else:
+    pipeline_cls = StableDiffusionXLInpaintPipeline if is_sdxl else StableDiffusionInpaintPipeline
+
+print(f"Selected pipeline class: {{pipeline_cls.__name__}}", flush=True)
+print("Loading pipeline weights...", flush=True)
+
+pipe = pipeline_cls.from_pretrained(
+    model_id,
+    torch_dtype=torch_dtype,
+    token=hf_token,
+)
+
+print("Configuring pipeline memory settings...", flush=True)
+pipe = pipe.to(device)
+print(f"Pipeline torch dtype: {{torch_dtype}}", flush=True)
+
+if device == "cuda":
+    total_vram_gb = 0.0
+    try:
+        total_vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+    except Exception as gpu_info_error:
+        print(f"Could not inspect CUDA VRAM: {{gpu_info_error}}", flush=True)
+
+    print(f"Detected CUDA VRAM: {{total_vram_gb:.1f}} GB", flush=True)
+    if total_vram_gb and total_vram_gb < 8.0:
+        try:
+            pipe.enable_attention_slicing()
+            print("Enabled attention slicing for low-VRAM GPU.", flush=True)
+        except Exception as slicing_error:
+            print(f"Could not enable attention slicing: {{slicing_error}}", flush=True)
+        try:
+            pipe.enable_vae_slicing()
+            print("Enabled VAE slicing for low-VRAM GPU.", flush=True)
+        except Exception as vae_slicing_error:
+            print(f"Could not enable VAE slicing: {{vae_slicing_error}}", flush=True)
+
+    try:
+        pipe.enable_xformers_memory_efficient_attention()
+        print("Enabled xformers memory-efficient attention.", flush=True)
+    except Exception as xformers_error:
+        print(f"xformers not available or unsupported: {{xformers_error}}", flush=True)
+
+    if _should_upcast_vae(pipe):
+        try:
+            pipe.upcast_vae()
+            print("Upcast VAE for more reliable decoding on CUDA fp16.", flush=True)
+        except Exception as upcast_error:
+            print(f"Could not upcast VAE: {{upcast_error}}", flush=True)
+else:
+    print("Running diffusion on CPU with float32.", flush=True)
+
+
+def _progress_callback(step: int, timestep: int, latents) -> None:
+    completed = int(step) + 1
+    percent = round((completed / max(steps, 1)) * 100.0, 1)
+    payload = json.dumps({{"step": completed, "total_steps": steps, "percent": percent}})
+    print(f"HB_DIFFUSION_PROGRESS:{{payload}}", flush=True)
+
+
+common_kwargs = {{
+    "prompt": prompt,
+    "negative_prompt": negative_prompt or None,
+    "num_inference_steps": steps,
+    "guidance_scale": guidance_scale,
+    "num_images_per_prompt": num_images,
+    "generator": generator,
+    "callback": _progress_callback,
+    "callback_steps": 1,
+}}
+
+if mode == "image-to-image":
+    common_kwargs["image"] = source_image
+    common_kwargs["strength"] = strength
+elif mode == "inpainting":
+    common_kwargs["image"] = source_image
+    common_kwargs["mask_image"] = mask_image
+    common_kwargs["strength"] = strength
+
+print("Starting diffusion inference...", flush=True)
+result = _run_pipe(pipe, common_kwargs)
+
+images = list(getattr(result, "images", []) or [])
+if not images:
+    raise RuntimeError("Diffusion pipeline produced no images.")
+
+safety_flagged = _log_safety_flags(result)
+all_black = all(_is_black_image(image) for image in images)
+print(f"All generated images black: {{all_black}}", flush=True)
+
+if all_black and not safety_flagged and device == "cuda" and torch_dtype == torch.float16:
+    print(
+        "Black image detected without a safety checker flag. Retrying once with safer VAE decode settings.",
+        flush=True,
+    )
+    retried = False
+    if hasattr(pipe, "upcast_vae"):
+        try:
+            pipe.upcast_vae()
+            print("Retry path: VAE upcast enabled.", flush=True)
+            retried = True
+        except Exception as retry_upcast_error:
+            print(f"Retry path could not upcast VAE: {{retry_upcast_error}}", flush=True)
+
+    if retried:
+        result = _run_pipe(pipe, common_kwargs)
+        images = list(getattr(result, "images", []) or [])
+        safety_flagged = _log_safety_flags(result)
+        if not images:
+            raise RuntimeError("Diffusion retry produced no images.")
+        all_black = all(_is_black_image(image) for image in images)
+        print(f"Post-retry all generated images black: {{all_black}}", flush=True)
+
+if all_black:
+    raise RuntimeError(
+        "Generated image is black. Inspect the logs above for safety checker flags or fp16 decode issues."
+    )
+
+run_prefix = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+saved_paths = []
+print(f"Saving {{len(images)}} generated image(s)...", flush=True)
+for index, image in enumerate(images, start=1):
+    out_path = os.path.abspath(os.path.join(output_dir, f"{{run_prefix}}_{{index:02d}}.png"))
     image.save(out_path)
-    print(f"Success! Image saved to {{out_path}}")
+    saved_paths.append(out_path)
+    print(f"HB_OUTPUT_IMAGE:{{out_path}}", flush=True)
+    print(f"Saved image {{index}} to {{out_path}}", flush=True)
 
-except Exception as e:
-    print(f"Failed to run diffusion model: {{e}}")
-    raise
+print(f"HB_OUTPUT_IMAGES:{{json.dumps(saved_paths)}}", flush=True)
+print("Diffusion generation completed successfully.", flush=True)
 """
 
     def _multimodal_template(self) -> str:

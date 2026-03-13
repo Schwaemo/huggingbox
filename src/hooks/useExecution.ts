@@ -147,7 +147,7 @@ function runtimeDependenciesForType(runtimeType: string): string[] {
     return ['transformers'];
   }
   if (runtime.startsWith('diffusers')) {
-    return ['diffusers', 'transformers'];
+    return ['diffusers', 'transformers', 'accelerate', 'torch', 'torchvision', 'pillow'];
   }
   if (runtime.startsWith('sentence_transformers')) {
     return ['sentence-transformers', 'transformers'];
@@ -387,6 +387,16 @@ export function useExecution() {
       scriptRelativePath?: string;
       runtimeSourceCode?: string;
       runMode?: 'prepared' | 'direct';
+      diffusionMode?: 'text-to-image' | 'image-to-image' | 'inpainting';
+      outputDir?: string;
+      negativePrompt?: string;
+      steps?: number;
+      guidanceScale?: number;
+      seed?: string;
+      numImages?: number;
+      strength?: number;
+      sourceImagePath?: string;
+      maskImagePath?: string;
     }
   ) => {
     const store = useAppStore.getState();
@@ -780,6 +790,16 @@ export function useExecution() {
         envStoragePath: options?.envStoragePath || null,
         storagePath: options?.storagePath || null,
         scriptRelativePath: options?.scriptRelativePath || null,
+        diffusionMode: options?.diffusionMode ?? null,
+        outputDir: options?.outputDir ?? null,
+        negativePrompt: options?.negativePrompt ?? null,
+        steps: options?.steps ?? null,
+        guidanceScale: options?.guidanceScale ?? null,
+        seed: options?.seed ?? null,
+        numImages: options?.numImages ?? null,
+        strength: options?.strength ?? null,
+        sourceImagePath: options?.sourceImagePath ?? null,
+        maskImagePath: options?.maskImagePath ?? null,
       });
     } catch (err) {
       stopTimer();

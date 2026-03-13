@@ -1186,6 +1186,16 @@ async fn run_python_code(
     env_storage_path: Option<String>,
     storage_path: Option<String>,
     script_relative_path: Option<String>,
+    diffusion_mode: Option<String>,
+    output_dir: Option<String>,
+    negative_prompt: Option<String>,
+    steps: Option<u32>,
+    guidance_scale: Option<f64>,
+    seed: Option<String>,
+    num_images: Option<u32>,
+    strength: Option<f64>,
+    source_image_path: Option<String>,
+    mask_image_path: Option<String>,
 ) -> Result<(), String> {
     {
         let lock = handle.execution_pid.lock().unwrap();
@@ -1283,6 +1293,69 @@ async fn run_python_code(
     } else {
         None
     };
+
+    if let Some(ref mode) = diffusion_mode {
+        if !mode.trim().is_empty() {
+            command.env("HB_DIFFUSION_MODE", mode.trim());
+        }
+    }
+    if let Some(ref prompt) = negative_prompt {
+        if !prompt.trim().is_empty() {
+            command.env("HB_NEGATIVE_PROMPT", prompt);
+        }
+    }
+    if let Some(value) = steps {
+        command.env("HB_STEPS", value.to_string());
+    }
+    if let Some(value) = guidance_scale {
+        command.env("HB_GUIDANCE_SCALE", value.to_string());
+    }
+    if let Some(ref value) = seed {
+        if !value.trim().is_empty() {
+            command.env("HB_SEED", value.trim());
+        }
+    }
+    if let Some(value) = num_images {
+        command.env("HB_NUM_IMAGES", value.to_string());
+    }
+    if let Some(value) = strength {
+        command.env("HB_STRENGTH", value.to_string());
+    }
+    if let Some(ref value) = source_image_path {
+        if !value.trim().is_empty() {
+            command.env("HB_SOURCE_IMAGE", value.trim());
+        }
+    }
+    if let Some(ref value) = mask_image_path {
+        if !value.trim().is_empty() {
+            command.env("HB_MASK_PATH", value.trim());
+        }
+    }
+
+    let resolved_output_dir = if let Some(custom) = output_dir.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(root) = &workspace_root {
+            let path = resolve_model_workspace_path(root, custom)?;
+            std::fs::create_dir_all(&path)
+                .map_err(|e| format!("Failed to create output directory: {}", e))?;
+            Some(path)
+        } else {
+            let path = PathBuf::from(custom);
+            std::fs::create_dir_all(&path)
+                .map_err(|e| format!("Failed to create output directory: {}", e))?;
+            Some(path)
+        }
+    } else if let Some(root) = &workspace_root {
+        let path = root.join("outputs");
+        std::fs::create_dir_all(&path)
+            .map_err(|e| format!("Failed to create output directory: {}", e))?;
+        Some(path)
+    } else {
+        None
+    };
+
+    if let Some(ref path) = resolved_output_dir {
+        command.env("HB_OUTPUT_DIR", path.to_string_lossy().to_string());
+    }
 
     let run_target_path = if let (Some(root), Some(relative)) = (&workspace_root, &trimmed_script_relative) {
         let path = resolve_model_workspace_path(root, relative)?;

@@ -24,8 +24,18 @@ class RuntimeRouter:
         model_type = self.config.get("model_type", "").lower()
         architectures = self.config.get("architectures", [])
         arch_string = "".join(architectures).lower()
+        diffusion_pipeline_tags = {"text-to-image", "image-to-image", "inpainting"}
         
-        if "diffusion" in model_type or "diffusion" in arch_string:
+        if (
+            self.pipeline_tag in diffusion_pipeline_tags
+            or "diffusion" in model_type
+            or "diffusion" in arch_string
+            or "stable_diffusion" in model_type
+            or "stable-diffusion" in model_type
+            or "stable diffusion" in arch_string
+            or "sdxl" in model_type
+            or "sdxl" in arch_string
+        ):
             return "diffusers"
 
         # Prioritize multimodal/OCR families before generic CausalLM routing.
