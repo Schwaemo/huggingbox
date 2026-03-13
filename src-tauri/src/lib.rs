@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use reqwest::Client;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
-use sysinfo::System;
+use sysinfo::{ProcessesToUpdate, System};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 const HF_TRANSFORMERS_GIT_URL: &str = "git+https://github.com/huggingface/transformers.git";
@@ -52,6 +52,15 @@ struct StreamPayload {
 #[derive(Serialize, Clone)]
 struct DonePayload {
     exit_code: i32,
+}
+
+#[derive(Serialize, Clone)]
+struct ExecutionStatsPayload {
+    pid: u32,
+    rss_bytes: u64,
+    virtual_memory_bytes: u64,
+    gpu_memory_bytes: Option<u64>,
+    elapsed_ms: u64,
 }
 
 #[derive(Serialize, Clone)]
@@ -1465,11 +1474,14 @@ async fn run_python_code(
         .spawn()
         .map_err(|e| format!("Failed to start Python: {}", e))?;
 
+    let started_at = std::time::Instant::now();
+
     // Store PID for cancellation
     let pid_arc = handle.execution_pid.clone();
+    let child_pid = child.id();
     {
         let mut lock = pid_arc.lock().unwrap();
-        *lock = child.id();
+        *lock = child_pid;
     }
 
     let stdout = child.stdout.take().ok_or("no stdout")?;
@@ -1482,6 +1494,31 @@ async fn run_python_code(
         let app_out = app_clone.clone();
         let app_err = app_clone.clone();
         let app_done = app_clone.clone();
+        let app_stats = app_clone.clone();
+        let pid_for_stats = child_pid;
+        let stats_started_at = started_at;
+
+        let t_stats = tokio::spawn(async move {
+            if let Some(pid_raw) = pid_for_stats {
+                let pid = sysinfo::Pid::from_u32(pid_raw);
+                let mut system = System::new_all();
+                loop {
+                    system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+                    if let Some(process) = system.process(pid) {
+                        let _ = app_stats.emit("execution-stats", ExecutionStatsPayload {
+                            pid: pid_raw,
+                            rss_bytes: process.memory(),
+                            virtual_memory_bytes: process.virtual_memory(),
+                            gpu_memory_bytes: None,
+                            elapsed_ms: stats_started_at.elapsed().as_millis() as u64,
+                        });
+                    } else {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                }
+            }
+        });
 
         let t_stdout = tokio::spawn(async move {
             let mut reader = tokio::io::BufReader::new(stdout);
@@ -1519,7 +1556,7 @@ async fn run_python_code(
         };
 
         // Drain remaining I/O
-        let _ = tokio::join!(t_stdout, t_stderr);
+        let _ = tokio::join!(t_stdout, t_stderr, t_stats);
 
         // Clear PID
         {

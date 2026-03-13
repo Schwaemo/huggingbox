@@ -15,6 +15,9 @@ class DependencyManager:
             
         if self.runtime == "diffusers":
             return ["diffusers", "transformers", "accelerate", "torch", "torchvision", "pillow"]
+
+        if self.runtime == "onnxruntime":
+            return ["optimum", "onnxruntime", "transformers", "torch", "pillow"]
             
         if self.runtime == "transformers_llm":
             return ["transformers", "accelerate", "torch", "sentencepiece"]

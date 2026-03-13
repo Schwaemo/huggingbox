@@ -17,6 +17,14 @@ interface ModelDependencyProbeResult {
   compatibilityError?: string | null;
 }
 
+interface ExecutionStatsPayload {
+  pid: number;
+  rss_bytes: number;
+  virtual_memory_bytes: number;
+  gpu_memory_bytes?: number | null;
+  elapsed_ms: number;
+}
+
 let executionListenerUsers = 0;
 let executionListenersCleanup: (() => void) | null = null;
 let executionListenersInitPromise: Promise<void> | null = null;
@@ -70,6 +78,7 @@ function scheduleBufferedStreamFlush(): void {
 }
 
 function queueStdout(text: string): void {
+  applyMetricMarkers(text);
   bufferedStdout += text;
   scheduleBufferedStreamFlush();
 }
@@ -77,6 +86,45 @@ function queueStdout(text: string): void {
 function queueStderr(text: string): void {
   bufferedStderr += text;
   scheduleBufferedStreamFlush();
+}
+
+function applyMetricMarkers(text: string): void {
+  const store = useAppStore.getState();
+  const runtimeMatches = Array.from(text.matchAll(/HB_RUNTIME:(.+)/g));
+  const providerMatches = Array.from(text.matchAll(/HB_PROVIDER:(.+)/g));
+  const inferenceMatches = Array.from(text.matchAll(/HB_METRIC_INFERENCE_SECONDS:(.+)/g));
+  const tokenMatches = Array.from(text.matchAll(/HB_METRIC_TOKENS:(.+)/g));
+
+  const patch: Parameters<typeof store.setExecutionStats>[0] = {};
+
+  const runtime = runtimeMatches[runtimeMatches.length - 1]?.[1]?.trim();
+  if (runtime) patch.executionRuntime = runtime;
+
+  const provider = providerMatches[providerMatches.length - 1]?.[1]?.trim();
+  if (provider) patch.executionProvider = provider;
+
+  const inferenceText = inferenceMatches[inferenceMatches.length - 1]?.[1]?.trim();
+  if (inferenceText) {
+    const inferenceSeconds = Number(inferenceText);
+    if (Number.isFinite(inferenceSeconds) && inferenceSeconds >= 0) {
+      patch.inferenceSeconds = inferenceSeconds;
+    }
+  }
+
+  const tokenText = tokenMatches[tokenMatches.length - 1]?.[1]?.trim();
+  if (tokenText) {
+    const tokenCount = Number(tokenText);
+    const inferenceSeconds =
+      patch.inferenceSeconds ??
+      useAppStore.getState().executionStats.inferenceSeconds;
+    if (Number.isFinite(tokenCount) && tokenCount >= 0 && inferenceSeconds && inferenceSeconds > 0) {
+      patch.tokensPerSecond = tokenCount / inferenceSeconds;
+    }
+  }
+
+  if (Object.keys(patch).length > 0) {
+    store.setExecutionStats(patch);
+  }
 }
 
 function normalizeDependencyName(raw: string): string {
@@ -151,6 +199,9 @@ function runtimeDependenciesForType(runtimeType: string): string[] {
   }
   if (runtime.startsWith('diffusers')) {
     return ['diffusers', 'transformers', 'accelerate', 'torch', 'torchvision', 'pillow'];
+  }
+  if (runtime === 'onnxruntime') {
+    return ['optimum', 'onnxruntime', 'transformers', 'torch', 'pillow'];
   }
   if (runtime.startsWith('sentence_transformers')) {
     return ['sentence-transformers', 'transformers'];
@@ -315,7 +366,16 @@ async function ensureExecutionListenersRegistered(): Promise<void> {
       });
     });
 
-    unlistens.push(u1, u2, u3, u4, u5, u6);
+    const u7 = await listen<ExecutionStatsPayload>('execution-stats', (e) => {
+      useAppStore.getState().setExecutionStats({
+        processRssBytes: e.payload.rss_bytes,
+        processVirtualMemoryBytes: e.payload.virtual_memory_bytes,
+        processGpuBytes: e.payload.gpu_memory_bytes ?? null,
+      });
+      useAppStore.getState().setExecutionElapsed(e.payload.elapsed_ms);
+    });
+
+    unlistens.push(u1, u2, u3, u4, u5, u6, u7);
     executionListenersCleanup = () => {
       for (const fn of unlistens) fn();
       executionListenersCleanup = null;
@@ -409,6 +469,7 @@ export function useExecution() {
     resetBufferedStreams();
     store.clearExecutionOutput();
     store.clearStderrOutput();
+    store.clearExecutionStats();
     store.setExecutionError(null);
     store.setDownloadStats(null);
     store.setExecutionState('running');
@@ -544,8 +605,16 @@ export function useExecution() {
 
     if (options?.runMode !== 'direct') {
       const runtimeType = detectRuntimeTypeFromCode(options?.runtimeSourceCode ?? store.generatedCode);
+      const prefersCudaForOnnx =
+        runtimeType === 'onnxruntime' &&
+        options?.preferredDevice !== 'cpu' &&
+        Boolean(store.systemInfo.gpuName);
       const runtimePackages = uniqueDependencies([
-        ...runtimeDependenciesForType(runtimeType),
+        ...runtimeDependenciesForType(runtimeType).map((pkg) =>
+          runtimeType === 'onnxruntime' && pkg === 'onnxruntime' && prefersCudaForOnnx
+            ? 'onnxruntime-gpu'
+            : pkg
+        ),
         ...(runtimeType === 'transformers_multimodal' && options?.multimodalTask === 'document-understanding'
           ? ['pymupdf']
           : []),

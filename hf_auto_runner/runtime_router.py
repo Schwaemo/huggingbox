@@ -20,6 +20,8 @@ class RuntimeRouter:
         # Check for GGUF first 
         if any(f.endswith(".gguf") for f in self.filenames):
             return "llama_cpp"
+        if self._has_onnx_assets() and self._supports_onnx_pipeline():
+            return "onnxruntime"
             
         model_type = self.config.get("model_type", "").lower()
         architectures = self.config.get("architectures", [])
@@ -79,3 +81,18 @@ class RuntimeRouter:
             
         # Default fallback
         return "transformers_generic"
+
+    def _has_onnx_assets(self) -> bool:
+        return any(f.endswith(".onnx") or f.endswith(".ort") for f in self.filenames)
+
+    def _supports_onnx_pipeline(self) -> bool:
+        return self.pipeline_tag in {
+            "text-classification",
+            "token-classification",
+            "feature-extraction",
+            "question-answering",
+            "image-classification",
+            "object-detection",
+            "zero-shot-image-classification",
+            "sentence-similarity",
+        }

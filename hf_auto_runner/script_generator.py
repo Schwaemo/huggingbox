@@ -26,6 +26,8 @@ class ScriptGenerator:
     def _get_template(self) -> str:
         if self.runtime == "llama_cpp":
             return self._llama_cpp_template()
+        if self.runtime == "onnxruntime":
+            return self._onnxruntime_template()
         if self.runtime == "diffusers":
             return self._diffusers_template()
         if self.runtime == "transformers_multimodal":
@@ -48,6 +50,7 @@ class ScriptGenerator:
     def _llama_cpp_template(self) -> str:
         return self._metadata_header() + f"""
 import os
+import time
 from huggingface_hub import hf_hub_download
 
 model_id = "{self.model_id}"
@@ -72,10 +75,152 @@ prompt = user_input if user_input else "Q: What is the capital of France? A:"
 
 print(f"Prompt: {{prompt}}")
 print("Running inference...")
+start = time.perf_counter()
 output = llm(prompt, max_tokens=128, echo=True)
+elapsed = max(time.perf_counter() - start, 1e-9)
+text = output['choices'][0]['text']
+token_count = len(text.split())
+print("HB_RUNTIME:llama_cpp")
+print("HB_METRIC_INFERENCE_SECONDS:" + str(elapsed))
+print("HB_METRIC_TOKENS:" + str(token_count))
 print("\\n" + "="*40)
-print(output['choices'][0]['text'])
+print(text)
 print("="*40)
+"""
+
+    def _onnxruntime_template(self) -> str:
+        pipeline_tag = (self.metadata.get("pipeline_tag") or "").lower()
+        return self._metadata_header() + "# FORMAT: onnx\n" + f"""
+import io
+import json
+import os
+import sys
+import time
+from urllib.parse import urlparse
+from urllib.request import urlopen
+
+from PIL import Image
+from transformers import AutoProcessor, AutoTokenizer, pipeline
+
+model_id = "{self.model_id}"
+pipeline_tag = "{pipeline_tag}"
+hf_token = os.environ.get("HF_TOKEN") or None
+hb_input = os.environ.get("HB_INPUT", "").strip()
+
+
+def _providers():
+    try:
+        import onnxruntime as ort
+    except Exception as exc:
+        raise RuntimeError(f"onnxruntime import failed: {{exc}}")
+    available = set(ort.get_available_providers())
+    if "CUDAExecutionProvider" in available:
+        return ["CUDAExecutionProvider", "CPUExecutionProvider"], "CUDAExecutionProvider"
+    return ["CPUExecutionProvider"], "CPUExecutionProvider"
+
+
+def _load_image(source: str) -> Image.Image:
+    if not source:
+        raise RuntimeError("Image-classification ONNX runtime requires HB_INPUT to contain an image path or URL.")
+    if source.startswith("data:image/"):
+        header, payload = source.split(",", 1)
+        import base64
+        return Image.open(io.BytesIO(base64.b64decode(payload))).convert("RGB")
+    if source.startswith("__HBIMG__:"):
+        import base64
+        return Image.open(io.BytesIO(base64.b64decode(source[len("__HBIMG__:"):]))).convert("RGB")
+    parsed = urlparse(source)
+    if parsed.scheme in ("http", "https"):
+        with urlopen(source, timeout=60) as response:
+            return Image.open(io.BytesIO(response.read())).convert("RGB")
+    if not os.path.isfile(source):
+        raise RuntimeError(f"Image input not found: {{source}}")
+    return Image.open(source).convert("RGB")
+
+
+def _load_model():
+    providers, active = _providers()
+    print(f"HB_RUNTIME:onnxruntime")
+    print(f"HB_PROVIDER:{{active}}")
+    print(f"Loading ONNX runtime for {{model_id}} with providers={{providers}}...", flush=True)
+    try:
+        if pipeline_tag == "text-classification":
+            from optimum.onnxruntime import ORTModelForSequenceClassification
+            tokenizer = AutoTokenizer.from_pretrained(model_id, token=hf_token, trust_remote_code=True)
+            model = ORTModelForSequenceClassification.from_pretrained(
+                model_id,
+                provider=active,
+                use_io_binding=active == "CUDAExecutionProvider",
+                token=hf_token,
+            )
+            return pipeline("text-classification", model=model, tokenizer=tokenizer)
+        if pipeline_tag == "token-classification":
+            from optimum.onnxruntime import ORTModelForTokenClassification
+            tokenizer = AutoTokenizer.from_pretrained(model_id, token=hf_token, trust_remote_code=True)
+            model = ORTModelForTokenClassification.from_pretrained(
+                model_id,
+                provider=active,
+                use_io_binding=active == "CUDAExecutionProvider",
+                token=hf_token,
+            )
+            return pipeline("token-classification", model=model, tokenizer=tokenizer)
+        if pipeline_tag == "feature-extraction" or pipeline_tag == "sentence-similarity":
+            from optimum.onnxruntime import ORTModelForFeatureExtraction
+            tokenizer = AutoTokenizer.from_pretrained(model_id, token=hf_token, trust_remote_code=True)
+            model = ORTModelForFeatureExtraction.from_pretrained(
+                model_id,
+                provider=active,
+                use_io_binding=active == "CUDAExecutionProvider",
+                token=hf_token,
+            )
+            return pipeline("feature-extraction", model=model, tokenizer=tokenizer)
+        if pipeline_tag == "question-answering":
+            from optimum.onnxruntime import ORTModelForQuestionAnswering
+            tokenizer = AutoTokenizer.from_pretrained(model_id, token=hf_token, trust_remote_code=True)
+            model = ORTModelForQuestionAnswering.from_pretrained(
+                model_id,
+                provider=active,
+                use_io_binding=active == "CUDAExecutionProvider",
+                token=hf_token,
+            )
+            return pipeline("question-answering", model=model, tokenizer=tokenizer)
+        if pipeline_tag == "image-classification":
+            from optimum.onnxruntime import ORTModelForImageClassification
+            processor = AutoProcessor.from_pretrained(model_id, token=hf_token, trust_remote_code=True)
+            model = ORTModelForImageClassification.from_pretrained(
+                model_id,
+                provider=active,
+                use_io_binding=active == "CUDAExecutionProvider",
+                token=hf_token,
+            )
+            return pipeline("image-classification", model=model, image_processor=processor)
+    except Exception as exc:
+        raise RuntimeError(
+            "Failed to load repo-shipped ONNX runtime for this pipeline. "
+            "This repo may not ship runnable ONNX weights for the selected task. "
+            f"Original error: {{exc}}"
+        )
+    raise RuntimeError(f"Unsupported ONNX pipeline for HuggingBox Sprint 9: {{pipeline_tag or 'unknown'}}")
+
+
+pipe = _load_model()
+started = time.perf_counter()
+
+if pipeline_tag == "question-answering":
+    if hb_input.startswith("__HBJSON__:"):
+        payload = json.loads(hb_input[len("__HBJSON__:"):])
+    else:
+        payload = json.loads(hb_input) if hb_input.startswith("{{") else {{"question": hb_input, "context": hb_input}}
+    result = pipe(question=payload.get("question", ""), context=payload.get("context", ""))
+elif pipeline_tag == "image-classification":
+    result = pipe(_load_image(hb_input))
+else:
+    prompt = hb_input or "Hello from HuggingBox ONNX runtime."
+    result = pipe(prompt)
+
+elapsed = max(time.perf_counter() - started, 1e-9)
+print("HB_METRIC_INFERENCE_SECONDS:" + str(elapsed))
+print(json.dumps(result, ensure_ascii=False))
 """
 
     def _diffusers_template(self) -> str:
@@ -881,6 +1026,7 @@ except Exception as e:
     def _llm_template(self) -> str:
         return self._metadata_header() + f"""
 import os
+import time
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -934,14 +1080,20 @@ try:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
     print("Generating...")
+    started = time.perf_counter()
     outputs = model.generate(
         **model_inputs,
         max_new_tokens=128,
         pad_token_id=tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
     )
+    elapsed = max(time.perf_counter() - started, 1e-9)
 
     input_length = model_inputs["input_ids"].shape[1]
     response = tokenizer.decode(outputs[0][input_length:], skip_special_tokens=True)
+    token_count = outputs[0][input_length:].shape[0]
+    print("HB_RUNTIME:transformers_llm")
+    print("HB_METRIC_INFERENCE_SECONDS:" + str(elapsed))
+    print("HB_METRIC_TOKENS:" + str(token_count))
 
     print("\\nOUTPUT:")
     print("="*40)

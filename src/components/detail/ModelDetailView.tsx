@@ -4,7 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../../stores/appStore';
 import type { HFModelDetail } from '../../stores/appStore';
 import { confirmDialog, messageDialog } from '../../services/dialogs';
-import { fetchModelDetail, estimateModelSize, formatBytes } from '../../services/huggingfaceApi';
+import { fetchModelDetail, estimateModelSize, formatBytes, getModelFormatInfo } from '../../services/huggingfaceApi';
 import { estimateRamBytes } from '../../utils/ramEstimation';
 import {
   buildCacheIdentity,
@@ -405,12 +405,13 @@ function WorkspaceLayout({
   const ramBytes = estimateRamBytes(model);
   const ramLabel = ramBytes > 0 ? `~${formatBytes(ramBytes)}` : undefined;
 
-  const siblings = model.siblings ?? [];
-  let formatLabel: string | undefined;
-  if (siblings.some((f) => f.rfilename.endsWith('.gguf'))) formatLabel = 'GGUF';
-  else if (siblings.some((f) => f.rfilename.endsWith('.onnx'))) formatLabel = 'ONNX';
-  else if (siblings.some((f) => f.rfilename.endsWith('.safetensors'))) formatLabel = 'SafeTensors';
-  else if (siblings.some((f) => f.rfilename.endsWith('.bin'))) formatLabel = 'PyTorch';
+  const formatInfo = getModelFormatInfo(model);
+  const formatLabel =
+    (formatInfo.hasGguf && 'GGUF') ||
+    (formatInfo.hasOnnx && 'ONNX') ||
+    (formatInfo.hasSafetensors && 'SafeTensors') ||
+    (formatInfo.hasPytorch && 'PyTorch') ||
+    undefined;
 
   useEffect(() => {
     initialCodeRef.current = code;

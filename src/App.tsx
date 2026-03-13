@@ -6,6 +6,7 @@ import { loadSettingsFromFile, saveSettingsToFile } from './services/settingsSto
 import { useExecution } from './hooks/useExecution';
 import HeaderBar from './components/layout/HeaderBar';
 import StatusBar from './components/layout/StatusBar';
+import ErrorBoundary from './components/shared/ErrorBoundary';
 import BrowseView from './components/browse/BrowseView';
 import ModelDetailView from './components/detail/ModelDetailView';
 import MyModelsView from './components/my-models/MyModelsView';
@@ -64,15 +65,17 @@ export default function App() {
   }, [theme]);
 
   return (
-    <div className="app-shell">
-      <HeaderBar />
-      <main className="app-main">
-        {currentView === 'browse' && <BrowseView />}
-        {currentView === 'model-detail' && <ModelDetailView />}
-        {currentView === 'my-models' && <MyModelsView />}
-        {currentView === 'settings' && <SettingsView />}
-      </main>
-      <StatusBar />
-    </div>
+    <ErrorBoundary>
+      <div className="app-shell">
+        <HeaderBar />
+        <main className="app-main">
+          {currentView === 'browse' && <BrowseView />}
+          {currentView === 'model-detail' && <ModelDetailView />}
+          {currentView === 'my-models' && <MyModelsView />}
+          {currentView === 'settings' && <SettingsView />}
+        </main>
+        <StatusBar />
+      </div>
+    </ErrorBoundary>
   );
 }

@@ -25,6 +25,16 @@ interface GalleryImage {
   url: string;
 }
 
+const MAX_RENDERED_OUTPUT_CHARS = 160_000;
+
+function safeStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch (error) {
+    return `[HuggingBox] Failed to stringify structured output: ${String(error)}`;
+  }
+}
+
 export default function OutputPanel({
   modelId,
   pipelineTag,
@@ -38,6 +48,7 @@ export default function OutputPanel({
   const executionState = useAppStore((s) => s.executionState);
   const executionError = useAppStore((s) => s.executionError);
   const downloadStats = useAppStore((s) => s.downloadStats);
+  const executionStats = useAppStore((s) => s.executionStats);
   const settings = useAppStore((s) => s.settings);
   const activeExecutionModelId = useAppStore((s) => s.activeExecutionModelId);
   const activeExecutionEnvModelId = useAppStore((s) => s.activeExecutionEnvModelId);
@@ -65,6 +76,10 @@ export default function OutputPanel({
       ? activeExecutionEnvModelId
       : modelId;
   const parsed = parseExecutionOutput(executionOutput, pipelineTag);
+  const renderedOutput =
+    executionOutput.length > MAX_RENDERED_OUTPUT_CHARS
+      ? `[HuggingBox] Showing last ${MAX_RENDERED_OUTPUT_CHARS.toLocaleString()} characters of stdout.\n${executionOutput.slice(-MAX_RENDERED_OUTPUT_CHARS)}`
+      : executionOutput;
   const galleryPaths = useMemo(() => {
     if (
       parsed.kind === 'image_gallery' &&
@@ -78,7 +93,27 @@ export default function OutputPanel({
     return [];
   }, [parsed]);
   const galleryPathsKey = useMemo(() => galleryPaths.join('|'), [galleryPaths]);
-  const structuredOutput = renderStructuredOutput();
+  let structuredOutput: ReturnType<typeof renderStructuredOutput> = null;
+  try {
+    structuredOutput = renderStructuredOutput();
+  } catch (error) {
+    console.error('[HuggingBox] Structured output render failed', error);
+    structuredOutput = (
+      <div
+        style={{
+          border: '1px solid var(--border)',
+          borderRadius: '6px',
+          padding: '12px',
+          backgroundColor: 'var(--bg-secondary)',
+          fontFamily: '"Inter", sans-serif',
+          fontSize: '13px',
+          color: 'var(--error)',
+        }}
+      >
+        Structured output could not be rendered. Raw stdout is still available below.
+      </div>
+    );
+  }
   const imageSource = useMemo(() => {
     if (inputValue.startsWith('__HBIMG__:')) return inputValue.slice('__HBIMG__:'.length);
     if (inputValue.startsWith('data:image/')) return inputValue;
@@ -88,6 +123,25 @@ export default function OutputPanel({
     if (multimodalTask === 'document-understanding') return multimodalDocumentPath?.trim() || '';
     return multimodalImagePath?.trim() || '';
   }, [multimodalDocumentPath, multimodalImagePath, multimodalTask]);
+
+  const performanceSummary = useMemo(() => {
+    const parts: string[] = [];
+    if (executionStats.executionRuntime) {
+      parts.push(`Runtime ${executionStats.executionRuntime}`);
+    }
+    if (executionStats.executionProvider) {
+      parts.push(`Provider ${executionStats.executionProvider.replace('ExecutionProvider', '')}`);
+    }
+    if (executionStats.processRssBytes) {
+      parts.push(`Proc RAM ${formatBytes(executionStats.processRssBytes)}`);
+    }
+    if (executionStats.tokensPerSecond) {
+      parts.push(`${executionStats.tokensPerSecond.toFixed(1)} tok/s`);
+    } else if (executionStats.inferenceSeconds) {
+      parts.push(`Inference ${executionStats.inferenceSeconds.toFixed(2)}s`);
+    }
+    return parts;
+  }, [executionStats]);
 
   function renderStructuredOutput() {
     if (parsed.kind === 'audio_transcript' && parsed.data && typeof parsed.data === 'object') {
@@ -257,7 +311,7 @@ export default function OutputPanel({
               wordBreak: 'break-word',
             }}
           >
-            {JSON.stringify(payload.data, null, 2)}
+            {safeStringify(payload.data)}
           </pre>
         </div>
       );
@@ -898,6 +952,33 @@ export default function OutputPanel({
             </div>
           </div>
         )}
+        {performanceSummary.length > 0 && (
+          <div
+            style={{
+              border: '1px solid var(--border)',
+              borderRadius: '6px',
+              padding: '10px 12px',
+              marginBottom: 'var(--space-md)',
+              backgroundColor: 'var(--bg-secondary)',
+              display: 'flex',
+              flexWrap: 'wrap',
+              gap: '12px',
+            }}
+          >
+            {performanceSummary.map((item) => (
+              <span
+                key={item}
+                style={{
+                  fontFamily: '"JetBrains Mono", monospace',
+                  fontSize: '11px',
+                  color: 'var(--text-secondary)',
+                }}
+              >
+                {item}
+              </span>
+            ))}
+          </div>
+        )}
         {!hasOutput && !isRunning && (
           <span
             style={{
@@ -966,13 +1047,13 @@ export default function OutputPanel({
                       lineHeight: 1.5,
                     }}
                   >
-                    {executionOutput}
+                    {renderedOutput}
                   </div>
                 )}
               </div>
             )}
           </div>
-        ) : executionOutput}
+        ) : renderedOutput}
         {isRunning && (
           <span
             style={{

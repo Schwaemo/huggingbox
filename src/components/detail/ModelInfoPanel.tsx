@@ -8,6 +8,7 @@ import {
   estimateModelSize,
   formatBytes,
   formatDownloads,
+  getModelFormatInfo,
 } from '../../services/huggingfaceApi';
 import { estimateRamBytes, getCompatibility } from '../../utils/ramEstimation';
 
@@ -47,17 +48,12 @@ export default function ModelInfoPanel({
   const truncated = rawDesc.length > MAX_DESC && !descExpanded;
   const displayDesc = truncated ? rawDesc.slice(0, MAX_DESC) + '...' : rawDesc;
 
-  // Detect available formats from siblings
-  const siblings = model.siblings ?? [];
-  const hasGGUF = siblings.some((f) => f.rfilename.endsWith('.gguf'));
-  const hasONNX = siblings.some((f) => f.rfilename.endsWith('.onnx'));
-  const hasSafetensors = siblings.some((f) => f.rfilename.endsWith('.safetensors'));
-  const hasPyTorch = siblings.some((f) => f.rfilename.endsWith('.bin'));
+  const formatInfo = getModelFormatInfo(model);
   const formats = [
-    hasGGUF && 'GGUF',
-    hasONNX && 'ONNX',
-    hasSafetensors && 'SafeTensors',
-    hasPyTorch && 'PyTorch',
+    formatInfo.hasGguf && 'GGUF',
+    formatInfo.hasOnnx && 'ONNX',
+    formatInfo.hasSafetensors && 'SafeTensors',
+    formatInfo.hasPytorch && 'PyTorch',
   ]
     .filter(Boolean)
     .join(', ') || 'Unknown';
@@ -185,27 +181,72 @@ export default function ModelInfoPanel({
       </div>
 
       {/* Compatibility indicator */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 'var(--space-sm)',
-          fontFamily: '"Inter", sans-serif',
-          fontSize: '14px',
-          color: compatInfo.color,
-        }}
-      >
-        <span
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+        <div
           style={{
-            width: '8px',
-            height: '8px',
-            borderRadius: '50%',
-            backgroundColor: compatInfo.dot,
-            display: 'inline-block',
-            flexShrink: 0,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 'var(--space-sm)',
+            fontFamily: '"Inter", sans-serif',
+            fontSize: '14px',
+            color: compatInfo.color,
           }}
-        />
-        {compatInfo.label}
+        >
+          <span
+            style={{
+              width: '8px',
+              height: '8px',
+              borderRadius: '50%',
+              backgroundColor: compatInfo.dot,
+              display: 'inline-block',
+              flexShrink: 0,
+            }}
+          />
+          {compatInfo.label}
+        </div>
+        {formatInfo.recommendationReason && (
+          <div
+            style={{
+              border: '1px solid var(--border)',
+              borderRadius: '6px',
+              padding: '10px 12px',
+              backgroundColor: 'var(--bg-secondary)',
+            }}
+          >
+            <div
+              style={{
+                fontFamily: '"JetBrains Mono", monospace',
+                fontSize: '11px',
+                color: 'var(--text-muted)',
+                textTransform: 'uppercase',
+                letterSpacing: '0.06em',
+                marginBottom: '4px',
+              }}
+            >
+              Recommended Runtime
+            </div>
+            <div
+              style={{
+                fontFamily: '"JetBrains Mono", monospace',
+                fontSize: '13px',
+                color: 'var(--text-primary)',
+                marginBottom: '4px',
+              }}
+            >
+              {formatInfo.recommendedRuntime}
+            </div>
+            <div
+              style={{
+                fontFamily: '"Inter", sans-serif',
+                fontSize: '13px',
+                color: 'var(--text-secondary)',
+                lineHeight: 1.5,
+              }}
+            >
+              {formatInfo.recommendationReason}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Actions */}

@@ -10,6 +10,24 @@ export interface FetchModelsParams {
   limit?: number;
 }
 
+export type RecommendedRuntime =
+  | 'llama_cpp'
+  | 'onnxruntime'
+  | 'diffusers'
+  | 'transformers_llm'
+  | 'transformers_multimodal'
+  | 'transformers_audio'
+  | 'transformers_generic';
+
+export interface ModelFormatInfo {
+  hasGguf: boolean;
+  hasOnnx: boolean;
+  hasSafetensors: boolean;
+  hasPytorch: boolean;
+  recommendedRuntime: RecommendedRuntime;
+  recommendationReason: string | null;
+}
+
 export async function fetchModels(
   params: FetchModelsParams = {},
   hfToken?: string,
@@ -78,6 +96,141 @@ export function estimateModelSize(model: HFModel): number {
   const params = count * scale;
   // Conservative fp16-style estimate: ~2 bytes/parameter.
   return Math.round(params * 2);
+}
+
+function getSiblingFilenames(model: HFModel): string[] {
+  return (model.siblings ?? []).map((item) => item.rfilename.toLowerCase());
+}
+
+function isLlmLikePipeline(tag: string): boolean {
+  return (
+    tag.includes('text-generation') ||
+    tag.includes('conversational') ||
+    tag.includes('chat')
+  );
+}
+
+function isOnnxSupportedPipeline(tag: string): boolean {
+  return [
+    'text-classification',
+    'token-classification',
+    'feature-extraction',
+    'question-answering',
+    'image-classification',
+    'object-detection',
+    'zero-shot-image-classification',
+    'sentence-similarity',
+  ].includes(tag);
+}
+
+function isDiffusionPipeline(tag: string): boolean {
+  return ['text-to-image', 'image-to-image', 'inpainting'].includes(tag);
+}
+
+function isMultimodalPipeline(tag: string): boolean {
+  return [
+    'image-text-to-text',
+    'image-to-text',
+    'visual-question-answering',
+    'document-question-answering',
+  ].includes(tag);
+}
+
+function isAudioPipeline(tag: string): boolean {
+  return [
+    'automatic-speech-recognition',
+    'audio-classification',
+    'text-to-speech',
+    'text-to-audio',
+  ].includes(tag);
+}
+
+export function getModelFormatInfo(model: HFModel): ModelFormatInfo {
+  const pipeline = (model.pipeline_tag ?? '').toLowerCase();
+  const files = getSiblingFilenames(model);
+  const hasGguf = files.some((name) => name.endsWith('.gguf'));
+  const hasOnnx = files.some((name) => name.endsWith('.onnx') || name.endsWith('.ort'));
+  const hasSafetensors = files.some((name) => name.endsWith('.safetensors'));
+  const hasPytorch = files.some((name) => name.endsWith('.bin') || name.endsWith('.pt') || name.endsWith('.pth'));
+
+  if (hasGguf && isLlmLikePipeline(pipeline)) {
+    return {
+      hasGguf,
+      hasOnnx,
+      hasSafetensors,
+      hasPytorch,
+      recommendedRuntime: 'llama_cpp',
+      recommendationReason:
+        'This repo includes GGUF weights, which are usually the best local option for LLM inference on your hardware.',
+    };
+  }
+
+  if (hasOnnx && isOnnxSupportedPipeline(pipeline)) {
+    return {
+      hasGguf,
+      hasOnnx,
+      hasSafetensors,
+      hasPytorch,
+      recommendedRuntime: 'onnxruntime',
+      recommendationReason:
+        'This repo includes ONNX weights and this pipeline usually runs faster with ONNX Runtime on your hardware.',
+    };
+  }
+
+  if (isDiffusionPipeline(pipeline)) {
+    return {
+      hasGguf,
+      hasOnnx,
+      hasSafetensors,
+      hasPytorch,
+      recommendedRuntime: 'diffusers',
+      recommendationReason: 'Diffusion models are best handled through the diffusers runtime.',
+    };
+  }
+
+  if (isMultimodalPipeline(pipeline)) {
+    return {
+      hasGguf,
+      hasOnnx,
+      hasSafetensors,
+      hasPytorch,
+      recommendedRuntime: 'transformers_multimodal',
+      recommendationReason: 'This model looks multimodal, so the multimodal transformers runtime is the right default.',
+    };
+  }
+
+  if (isAudioPipeline(pipeline)) {
+    return {
+      hasGguf,
+      hasOnnx,
+      hasSafetensors,
+      hasPytorch,
+      recommendedRuntime: 'transformers_audio',
+      recommendationReason: 'This model uses an audio pipeline, so the audio runtime is the right default.',
+    };
+  }
+
+  if (isLlmLikePipeline(pipeline)) {
+    return {
+      hasGguf,
+      hasOnnx,
+      hasSafetensors,
+      hasPytorch,
+      recommendedRuntime: 'transformers_llm',
+      recommendationReason: 'This is a text-generation model without GGUF assets, so transformers is the default runtime.',
+    };
+  }
+
+  return {
+    hasGguf,
+    hasOnnx,
+    hasSafetensors,
+    hasPytorch,
+    recommendedRuntime: 'transformers_generic',
+    recommendationReason: hasSafetensors || hasPytorch
+      ? 'This repo ships standard transformers weights, so the generic transformers runtime is the default.'
+      : null,
+  };
 }
 
 // Format bytes to human-readable string

@@ -14,6 +14,7 @@ export default function StatusBar() {
   const systemInfo = useAppStore((s) => s.systemInfo);
   const executionState = useAppStore((s) => s.executionState);
   const executionElapsed = useAppStore((s) => s.executionElapsed);
+  const executionStats = useAppStore((s) => s.executionStats);
   const activeExecutionModelId = useAppStore((s) => s.activeExecutionModelId);
   const navigateToModel = useAppStore((s) => s.navigateToModel);
 
@@ -29,7 +30,10 @@ export default function StatusBar() {
 
   const pythonStatus = getPythonStatus();
   const usedRam = systemInfo.totalRam - systemInfo.availableRam;
+  const processRam = executionStats.processRssBytes;
   const isExecutionClickable = Boolean(activeExecutionModelId);
+  const isActiveExecution =
+    executionState === 'running' || executionState === 'installing' || executionState === 'downloading';
 
   function getExecutionLabel(): string {
     switch (executionState) {
@@ -92,12 +96,14 @@ export default function StatusBar() {
       aria-label="Status bar"
     >
       <span style={mono}>
-        RAM:{' '}
-        {systemInfo.totalRam > 0 ? (
+        {isActiveExecution && processRam
+          ? `Proc RAM: ${formatRam(processRam)} GB`
+          : 'RAM: '}
+        {!isActiveExecution && systemInfo.totalRam > 0 ? (
           <>
             {formatRam(usedRam)}/{formatRam(systemInfo.totalRam)} GB
           </>
-        ) : (
+        ) : isActiveExecution && processRam ? null : (
           '...'
         )}
       </span>
@@ -105,10 +111,24 @@ export default function StatusBar() {
       {divider}
 
       <span style={mono}>
-        {systemInfo.gpuName
-          ? `GPU: ${systemInfo.gpuName}${systemInfo.gpuVram ? ` ${systemInfo.gpuVram}GB` : ''}`
-          : 'No GPU detected'}
+        {isActiveExecution && executionStats.executionRuntime
+          ? `Runtime: ${executionStats.executionRuntime}${executionStats.executionProvider ? ` (${executionStats.executionProvider.replace('ExecutionProvider', '')})` : ''}`
+          : systemInfo.gpuName
+            ? `GPU: ${systemInfo.gpuName}${systemInfo.gpuVram ? ` ${systemInfo.gpuVram}GB` : ''}`
+            : 'No GPU detected'}
       </span>
+
+      {isActiveExecution && executionStats.tokensPerSecond ? (
+        <>
+          {divider}
+          <span style={mono}>{executionStats.tokensPerSecond.toFixed(1)} tok/s</span>
+        </>
+      ) : isActiveExecution && executionStats.inferenceSeconds ? (
+        <>
+          {divider}
+          <span style={mono}>{executionStats.inferenceSeconds.toFixed(2)}s infer</span>
+        </>
+      ) : null}
 
       {divider}
 

@@ -7,6 +7,7 @@ import {
   estimateModelSize,
   formatBytes,
   formatDownloads,
+  getModelFormatInfo,
 } from '../../services/huggingfaceApi';
 import { getCompatibility } from '../../utils/ramEstimation';
 
@@ -28,6 +29,7 @@ function ModelCard({ model }: ModelCardProps) {
   const sizeBytes = estimateModelSize(model);
   const compat = getCompatibility(model, totalRam);
   const compatInfo = COMPAT_CONFIG[compat];
+  const formatInfo = getModelFormatInfo(model);
 
   const [org, ...nameParts] = (model.modelId ?? model.id).split('/');
   const modelName = nameParts.join('/') || org;
@@ -129,6 +131,26 @@ function ModelCard({ model }: ModelCardProps) {
       )}
 
       {/* Metadata row */}
+      {['llama_cpp', 'onnxruntime'].includes(formatInfo.recommendedRuntime) && (
+        <div
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            alignSelf: 'flex-start',
+            padding: '2px 6px',
+            borderRadius: '2px',
+            backgroundColor: 'var(--bg-tertiary)',
+            fontFamily: '"JetBrains Mono", monospace',
+            fontSize: '10px',
+            color: 'var(--accent-secondary)',
+            textTransform: 'uppercase',
+            letterSpacing: '0.06em',
+          }}
+        >
+          Recommended: {formatInfo.recommendedRuntime === 'llama_cpp' ? 'GGUF' : 'ONNX'}
+        </div>
+      )}
+
       <div
         style={{
           display: 'flex',

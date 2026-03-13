@@ -85,6 +85,25 @@ export interface DownloadStats {
   filename?: string;
 }
 
+export interface ExecutionStats {
+  executionRuntime: string | null;
+  executionProvider: string | null;
+  processRssBytes: number | null;
+  processVirtualMemoryBytes: number | null;
+  processGpuBytes: number | null;
+  tokensPerSecond: number | null;
+  inferenceSeconds: number | null;
+}
+
+const MAX_OUTPUT_CHARS = 400_000;
+
+function trimOutputBuffer(current: string, incoming: string): string {
+  const merged = current + incoming;
+  if (merged.length <= MAX_OUTPUT_CHARS) return merged;
+  const trimmed = merged.slice(-MAX_OUTPUT_CHARS);
+  return `[HuggingBox] Output trimmed to last ${MAX_OUTPUT_CHARS.toLocaleString()} characters.\n${trimmed}`;
+}
+
 // ─── Store Interface ─────────────────────────────────────────────────────────
 
 interface AppStore {
@@ -121,6 +140,7 @@ interface AppStore {
   executionStartTime: number | null;
   executionElapsed: number;
   downloadStats: DownloadStats | null;
+  executionStats: ExecutionStats;
 
   // Output
   outputType: OutputType;
@@ -171,6 +191,8 @@ interface AppStore {
   setExecutionStartTime: (t: number | null) => void;
   setExecutionElapsed: (t: number) => void;
   setDownloadStats: (stats: DownloadStats | null) => void;
+  setExecutionStats: (stats: Partial<ExecutionStats>) => void;
+  clearExecutionStats: () => void;
 
   setSystemInfo: (info: Partial<SystemInfo>) => void;
   updateSettings: (patch: Partial<AppSettings>) => void;
@@ -215,6 +237,15 @@ export const useAppStore = create<AppStore>((set) => ({
   executionStartTime: null,
   executionElapsed: 0,
   downloadStats: null,
+  executionStats: {
+    executionRuntime: null,
+    executionProvider: null,
+    processRssBytes: null,
+    processVirtualMemoryBytes: null,
+    processGpuBytes: null,
+    tokensPerSecond: null,
+    inferenceSeconds: null,
+  },
 
   // Output
   outputType: 'none',
@@ -272,6 +303,15 @@ export const useAppStore = create<AppStore>((set) => ({
         executionStartTime: null,
         executionElapsed: 0,
         downloadStats: null,
+        executionStats: {
+          executionRuntime: null,
+          executionProvider: null,
+          processRssBytes: null,
+          processVirtualMemoryBytes: null,
+          processGpuBytes: null,
+          tokensPerSecond: null,
+          inferenceSeconds: null,
+        },
         activeExecutionModelId:
           s.activeExecutionModelId && s.activeExecutionModelId === id
             ? s.activeExecutionModelId
@@ -308,15 +348,29 @@ export const useAppStore = create<AppStore>((set) => ({
 
   setExecutionState: (state) => set({ executionState: state }),
   appendExecutionOutput: (text) =>
-    set((s) => ({ executionOutput: s.executionOutput + text })),
+    set((s) => ({ executionOutput: trimOutputBuffer(s.executionOutput, text) })),
   clearExecutionOutput: () => set({ executionOutput: '' }),
   appendStderrOutput: (text) =>
-    set((s) => ({ stderrOutput: s.stderrOutput + text })),
+    set((s) => ({ stderrOutput: trimOutputBuffer(s.stderrOutput, text) })),
   clearStderrOutput: () => set({ stderrOutput: '' }),
   setExecutionError: (err) => set({ executionError: err }),
   setExecutionStartTime: (t) => set({ executionStartTime: t }),
   setExecutionElapsed: (t) => set({ executionElapsed: t }),
   setDownloadStats: (stats) => set({ downloadStats: stats }),
+  setExecutionStats: (stats) =>
+    set((s) => ({ executionStats: { ...s.executionStats, ...stats } })),
+  clearExecutionStats: () =>
+    set({
+      executionStats: {
+        executionRuntime: null,
+        executionProvider: null,
+        processRssBytes: null,
+        processVirtualMemoryBytes: null,
+        processGpuBytes: null,
+        tokensPerSecond: null,
+        inferenceSeconds: null,
+      },
+    }),
 
   setSystemInfo: (info) =>
     set((s) => ({ systemInfo: { ...s.systemInfo, ...info } })),
