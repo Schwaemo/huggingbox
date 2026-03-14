@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::process::Stdio;
 use std::path::PathBuf;
@@ -8,7 +8,31 @@ use serde::{Deserialize, Serialize};
 use sysinfo::{ProcessesToUpdate, System};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 const HF_TRANSFORMERS_GIT_URL: &str = "git+https://github.com/huggingface/transformers.git";
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+static GPU_INFO_CACHE: OnceLock<Option<(String, u64)>> = OnceLock::new();
+
+#[cfg(target_os = "windows")]
+fn apply_no_window_std(command: &mut std::process::Command) {
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn apply_no_window_std(_command: &mut std::process::Command) {}
+
+#[cfg(target_os = "windows")]
+fn apply_no_window_tokio(command: &mut tokio::process::Command) {
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn apply_no_window_tokio(_command: &mut tokio::process::Command) {}
 
 // ─── Managed State ────────────────────────────────────────────────────────────
 
@@ -674,73 +698,79 @@ fn kill_pid(pid: u32, force: bool) {
 fn detect_gpu_windows() -> Option<(String, u64)> {
     #[cfg(target_os = "windows")]
     {
-        // Prefer CUDA devices from nvidia-smi when available.
-        if let Some(primary_cuda) = detect_cuda_gpus().into_iter().next() {
-            return Some((primary_cuda.name, primary_cuda.vram_gb.unwrap_or(0)));
-        }
+        GPU_INFO_CACHE
+            .get_or_init(|| {
+                // Prefer CUDA devices from nvidia-smi when available.
+                if let Some(primary_cuda) = detect_cuda_gpus().into_iter().next() {
+                    return Some((primary_cuda.name, primary_cuda.vram_gb.unwrap_or(0)));
+                }
 
-        let output = std::process::Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                "Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM | ConvertTo-Json -Compress",
-            ])
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-
-        let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if raw.is_empty() {
-            return None;
-        }
-
-        let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
-        let rows: Vec<serde_json::Value> = if value.is_array() {
-            value.as_array()?.clone()
-        } else {
-            vec![value]
-        };
-
-        let is_virtual = |name: &str| {
-            let lower = name.to_lowercase();
-            lower.contains("virtual")
-                || lower.contains("basic render")
-                || lower.contains("remote display")
-                || lower.contains("parsec")
-        };
-
-        let preferred = rows
-            .iter()
-            .find_map(|row| {
-                let name = row.get("Name")?.as_str()?.to_string();
-                if is_virtual(&name) {
+                let mut command = std::process::Command::new("powershell");
+                apply_no_window_std(&mut command);
+                let output = command
+                    .args([
+                        "-NoProfile",
+                        "-Command",
+                        "Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM | ConvertTo-Json -Compress",
+                    ])
+                    .output()
+                    .ok()?;
+                if !output.status.success() {
                     return None;
                 }
-                let bytes = row.get("AdapterRAM").and_then(|v| v.as_u64()).unwrap_or(0);
-                let vram_gb = if bytes > 0 {
-                    (bytes / (1024_u64 * 1024_u64 * 1024_u64)).max(1)
-                } else {
-                    0
-                };
-                Some((name, vram_gb))
-            });
 
-        if preferred.is_some() {
-            preferred
-        } else {
-            rows.first().and_then(|row| {
-                let name = row.get("Name")?.as_str()?.to_string();
-                let bytes = row.get("AdapterRAM").and_then(|v| v.as_u64()).unwrap_or(0);
-                let vram_gb = if bytes > 0 {
-                    (bytes / (1024_u64 * 1024_u64 * 1024_u64)).max(1)
+                let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if raw.is_empty() {
+                    return None;
+                }
+
+                let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+                let rows: Vec<serde_json::Value> = if value.is_array() {
+                    value.as_array()?.clone()
                 } else {
-                    0
+                    vec![value]
                 };
-                Some((name, vram_gb))
+
+                let is_virtual = |name: &str| {
+                    let lower = name.to_lowercase();
+                    lower.contains("virtual")
+                        || lower.contains("basic render")
+                        || lower.contains("remote display")
+                        || lower.contains("parsec")
+                };
+
+                let preferred = rows
+                    .iter()
+                    .find_map(|row| {
+                        let name = row.get("Name")?.as_str()?.to_string();
+                        if is_virtual(&name) {
+                            return None;
+                        }
+                        let bytes = row.get("AdapterRAM").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let vram_gb = if bytes > 0 {
+                            (bytes / (1024_u64 * 1024_u64 * 1024_u64)).max(1)
+                        } else {
+                            0
+                        };
+                        Some((name, vram_gb))
+                    });
+
+                if preferred.is_some() {
+                    preferred
+                } else {
+                    rows.first().and_then(|row| {
+                        let name = row.get("Name")?.as_str()?.to_string();
+                        let bytes = row.get("AdapterRAM").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let vram_gb = if bytes > 0 {
+                            (bytes / (1024_u64 * 1024_u64 * 1024_u64)).max(1)
+                        } else {
+                            0
+                        };
+                        Some((name, vram_gb))
+                    })
+                }
             })
-        }
+            .clone()
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -749,7 +779,9 @@ fn detect_gpu_windows() -> Option<(String, u64)> {
 }
 
 fn detect_cuda_gpus() -> Vec<GpuInfoPayload> {
-    let output = std::process::Command::new("nvidia-smi")
+    let mut command = std::process::Command::new("nvidia-smi");
+    apply_no_window_std(&mut command);
+    let output = command
         .args(["--query-gpu=index,name,memory.total", "--format=csv,noheader,nounits"])
         .output();
 
@@ -851,7 +883,7 @@ fn init_db(conn: &Connection) -> Result<(), String> {
 #[tauri::command]
 fn get_system_info() -> SystemInfoPayload {
     let mut sys = System::new_all();
-    sys.refresh_all();
+    sys.refresh_memory();
 
     let gpu = detect_gpu_windows();
 
@@ -981,10 +1013,9 @@ async fn detect_python(app: AppHandle) -> PythonInfo {
         if !candidate.exists() {
             continue;
         }
-        if let Ok(output) = tokio::process::Command::new(&candidate)
-            .arg("--version")
-            .output()
-            .await
+        let mut command = tokio::process::Command::new(&candidate);
+        apply_no_window_tokio(&mut command);
+        if let Ok(output) = command.arg("--version").output().await
         {
             if output.status.success() {
                 let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -1003,10 +1034,9 @@ async fn detect_python(app: AppHandle) -> PythonInfo {
     }
 
     for candidate in ["python3", "python"] {
-        if let Ok(output) = tokio::process::Command::new(candidate)
-            .arg("--version")
-            .output()
-            .await
+        let mut command = tokio::process::Command::new(candidate);
+        apply_no_window_tokio(&mut command);
+        if let Ok(output) = command.arg("--version").output().await
         {
             if output.status.success() {
                 let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
