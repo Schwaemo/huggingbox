@@ -59,17 +59,29 @@ docs/                PRD, design spec, sprint plan
 
 ## Requirements
 
-For Windows development:
+### To run HuggingBox on Windows
+
+- Windows 10 or 11
+- WebView2 runtime
+- internet access for browsing/downloading models
+- enough disk space for model files and Python environments
+
+Optional but recommended:
+- a Hugging Face token for gated/private models
+- an Anthropic API key if you want to use Claude Sonnet code generation or Fix mode
+- a CUDA-capable GPU for faster local inference on supported models
+
+Notes:
+- HuggingBox manages per-model Python environments itself.
+- Some models may still require extra Python packages or system tools depending on their runtime.
+- Audio/document workflows may rely on bundled or system `ffmpeg` depending on your setup.
+
+### To build HuggingBox from source
 
 - Node.js 18+
 - Rust toolchain
 - Tauri prerequisites
 - Python 3.11+
-- WebView2 runtime
-
-You will also want:
-- a Hugging Face token for gated/private models
-- an Anthropic API key if you want to use Claude Sonnet code generation (recommended)
 
 ## Development
 
