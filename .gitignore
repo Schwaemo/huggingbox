@@ -45,3 +45,7 @@ Thumbs.db
 *.db-shm
 *.db-wal
 *.tmp
+
+.claude
+.vscode
+ 

@@ -45,7 +45,7 @@ Rules:
 - Never make network calls to domains other than huggingface.co
 - Dark mode is default
 ```
-
+ 
 ---
 
 **Step 7: Set up your AI coding tool (10 minutes)**
