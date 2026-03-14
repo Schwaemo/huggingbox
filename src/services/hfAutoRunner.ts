@@ -20,6 +20,13 @@ interface AnthropicMessagesResponse {
   text?: string;
 }
 
+interface ClaudeFixContext {
+  currentCode: string;
+  stderrOutput: string;
+  installedModules: string;
+  executionError?: string | null;
+}
+
 const CLAUDE_SONNET_MODEL = 'claude-sonnet-4-6';
 
 function previewText(raw: string, max = 2200): string {
@@ -265,6 +272,109 @@ export async function generateCodeWithClaude(
   } catch (error) {
     throw error;
   }
+}
+
+export async function fixCodeWithClaude(
+  model: HFModelDetail,
+  settings: AppSettings,
+  system: SystemInfo,
+  context: ClaudeFixContext
+): Promise<CodeGenerationResponse> {
+  const modelId = model.modelId || model.id;
+  const claudeApiKey = settings.claudeApiKey?.trim();
+
+  if (!modelId) {
+    throw new Error('Model ID is required to fix code.');
+  }
+  if (!claudeApiKey) {
+    throw new Error('Anthropic API key is required for Claude Sonnet fix mode.');
+  }
+
+  const readme = (model.readme?.trim() ? model.readme : await fetchModelReadme(modelId, settings.hfToken?.trim() || undefined)).trim();
+  const siblingNames = (model.siblings ?? []).map((item) => item.rfilename).slice(0, 200);
+  const systemSummary = {
+    totalRamGb: Number((system.totalRam / 1024 ** 3).toFixed(1)),
+    availableRamGb: Number((system.availableRam / 1024 ** 3).toFixed(1)),
+    gpuName: system.gpuName,
+    gpuVramGb: system.gpuVram,
+    os: system.os,
+  };
+
+  const prompt = [
+    'Fix the current HuggingBox Python script using the runtime failure context below.',
+    'You must use web search before answering to verify the model-specific runtime, dependency requirements, and input format.',
+    '',
+    'Return strict JSON only with this exact shape:',
+    '{',
+    '  "analysis": "short explanation of what was wrong and what was changed",',
+    '  "code": "full corrected python script as a string",',
+    '  "dependencies": ["pip package spec", "..."]',
+    '}',
+    '',
+    'Requirements for the corrected Python script:',
+    '- It must be a single file.',
+    '- It must use the provided model id exactly.',
+    '- Preserve HuggingBox environment contracts.',
+    '- HB_INPUT is the primary text/runtime input contract unless the model is multimodal.',
+    '- For Sprint 8 multimodal code, use HB_INPUT for text only, HB_IMAGE_PATH for uploaded images, HB_DOCUMENT_PATH for uploaded document images or PDFs, and HB_MULTIMODAL_TASK for the selected multimodal task.',
+    '- It must read HF_TOKEN from the environment when available, but fall back to no token if missing.',
+    '- It must be verbose about progress logging and flush logs immediately.',
+    '- Preserve machine-readable markers like HB_OUTPUT_AUDIO, HB_MULTIMODAL_TEXT, HB_MULTIMODAL_JSON, and HB_REFERENCE_IMAGE when applicable.',
+    '- Never invent or download sample inputs.',
+    '- Only include dependencies actually needed by the corrected script.',
+    '- If the fix requires non-pip system packages, explain them in analysis rather than dependencies.',
+    '',
+    `Model ID: ${modelId}`,
+    `Pipeline Tag: ${model.pipeline_tag ?? 'unknown'}`,
+    `Author: ${model.author ?? 'unknown'}`,
+    `Tags: ${(model.tags ?? []).join(', ')}`,
+    `Description: ${model.description ?? ''}`,
+    `Sibling Files: ${JSON.stringify(siblingNames)}`,
+    `System Info: ${JSON.stringify(systemSummary)}`,
+    '',
+    'Current code:',
+    context.currentCode || '(empty)',
+    '',
+    'Execution error:',
+    context.executionError?.trim() || '(none captured)',
+    '',
+    'Green console / stderr output:',
+    context.stderrOutput?.trim() || '(none captured)',
+    '',
+    'Installed modules from pip freeze:',
+    context.installedModules?.trim() || '(no modules captured)',
+    '',
+    'README:',
+    readme || '(README not available)',
+  ].join('\n');
+
+  const payload = await invoke<AnthropicMessagesResponse>('generate_code_with_claude', {
+    model: CLAUDE_SONNET_MODEL,
+    apiKey: claudeApiKey,
+    prompt,
+  });
+  const text = payload.text?.trim() ?? '';
+
+  if (!text) {
+    throw new Error('Anthropic API returned no text content.');
+  }
+
+  const parsed = parseRunnerResponse(text);
+  if (!parsed.code || !parsed.analysis) {
+    throw new Error(
+      `Claude Sonnet returned an invalid fix payload.\nPayload preview:\n${previewText(text)}`
+    );
+  }
+
+  return {
+    code: parsed.code,
+    analysis: parsed.analysis,
+    dependencies: withHfTransfer(
+      Array.isArray(parsed.dependencies)
+        ? parsed.dependencies.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+        : []
+    ),
+  };
 }
 
 export function buildFallbackCode(model: HFModelDetail): string {

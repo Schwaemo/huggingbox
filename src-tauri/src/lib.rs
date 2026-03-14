@@ -1106,7 +1106,7 @@ async fn generate_code_with_claude(
     let client = Client::new();
     let body = serde_json::json!({
         "model": model,
-        "max_tokens": 4125,
+        "max_tokens": 5000,
         "temperature": 0,
         "messages": [
             {
@@ -1117,6 +1117,17 @@ async fn generate_code_with_claude(
                         "text": prompt,
                     }
                 ]
+            }
+        ],
+        "tools": [
+            {
+                "name": "web_search",
+                "type": "web_search_20250305",
+                "allowed_domains": [
+                    "huggingface.co",
+                    "github.com"
+                ],
+                "max_uses": 3
             }
         ],
         "thinking": {

@@ -10,6 +10,7 @@ import {
   buildCacheIdentity,
   buildFallbackAnalysis,
   buildFallbackCode,
+  fixCodeWithClaude,
   generateCodeWithClaude,
   generateCodeLocally,
 } from '../../services/hfAutoRunner';
@@ -41,7 +42,12 @@ export default function ModelDetailView() {
   const modelDetailLoading = useAppStore((s) => s.modelDetailLoading);
   const modelDetailError = useAppStore((s) => s.modelDetailError);
   const generatedCode = useAppStore((s) => s.generatedCode);
+  const codeGenerating = useAppStore((s) => s.codeGenerating);
   const executionState = useAppStore((s) => s.executionState);
+  const executionError = useAppStore((s) => s.executionError);
+  const stderrOutput = useAppStore((s) => s.stderrOutput);
+  const activeExecutionModelId = useAppStore((s) => s.activeExecutionModelId);
+  const activeExecutionEnvModelId = useAppStore((s) => s.activeExecutionEnvModelId);
   const navigateToBrowse = useAppStore((s) => s.navigateToBrowse);
   const setModelDetail = useAppStore((s) => s.setModelDetail);
   const setModelDetailLoading = useAppStore((s) => s.setModelDetailLoading);
@@ -196,6 +202,100 @@ export default function ModelDetailView() {
     await generateCode({ bypassCache: true });
   }
 
+  async function syncClaudeDependencies(
+    modelId: string,
+    dependencies: string[] | undefined,
+    analysis: string
+  ): Promise<string> {
+    if (!Array.isArray(dependencies) || dependencies.length === 0) {
+      return analysis;
+    }
+
+    const missingClaudeDependencies = await invoke<string[]>('check_packages', {
+      packages: dependencies,
+      modelId,
+      venvModelId: modelId,
+    });
+
+    if (missingClaudeDependencies.length === 0) {
+      return `${analysis}\n\nClaude-suggested dependencies are already installed in this model environment.`;
+    }
+
+    if (!settings.claudeAutoInstallDependencies) {
+      return `${analysis}\n\nClaude-suggested missing dependencies:\n${missingClaudeDependencies.join(', ')}`;
+    }
+
+    const approved = await confirmDialog(
+      `Claude suggested these Python dependencies for ${modelId}.\n\nAlready installed dependencies were skipped.\n\nMissing dependencies:\n${missingClaudeDependencies.join('\n')}\n\nInstall the missing dependencies into this model environment now?`
+    );
+    if (!approved) {
+      return `${analysis}\n\nClaude-suggested missing dependencies:\n${missingClaudeDependencies.join(', ')}`;
+    }
+
+    await invoke('install_packages', {
+      packages: missingClaudeDependencies,
+      modelId,
+      venvModelId: modelId,
+    });
+    return `${analysis}\n\nInstalled Claude-suggested missing dependencies:\n${missingClaudeDependencies.join(', ')}`;
+  }
+
+  async function handleFixCode() {
+    if (!modelDetail) return;
+    const modelId = modelDetail.modelId ?? modelDetail.id;
+    const currentCode = generatedCode ?? '';
+    const envModelId =
+      activeExecutionModelId === modelId && activeExecutionEnvModelId
+        ? activeExecutionEnvModelId
+        : modelId;
+
+    if (!settings.claudeApiKey.trim()) {
+      setCodeGenerationError('Claude Sonnet fix mode requires an Anthropic API key in Settings.');
+      return;
+    }
+
+    setCodeGenerationError(null);
+    setCodeGenerating(true);
+
+    try {
+      const freezeResult = await invoke<{
+        stdout: string;
+        stderr: string;
+        exitCode: number;
+        cwd: string;
+      }>('run_model_shell_command', {
+        modelId,
+        venvModelId: envModelId,
+        command: 'python -m pip freeze',
+        modelStoragePath: settings.modelStoragePath || null,
+        envStoragePath: settings.envStoragePath || null,
+        cwd: null,
+        hfToken: settings.hfToken || null,
+      });
+
+      const fixed = await fixCodeWithClaude(modelDetail, settings, systemInfo, {
+        currentCode,
+        stderrOutput: stderrOutput || freezeResult.stderr || '',
+        installedModules: freezeResult.stdout || '',
+        executionError,
+      });
+
+      setGeneratedCode(fixed.code);
+      setCodeSource('generated');
+      const enrichedAnalysis = await syncClaudeDependencies(modelId, fixed.dependencies, fixed.analysis);
+      setClaudeAnalysis(enrichedAnalysis);
+      setCodeGenerationError(null);
+    } catch (error) {
+      setCodeGenerationError(`Claude fix failed: ${String(error)}`);
+    } finally {
+      setCodeGenerating(false);
+    }
+  }
+
+  const showFixButton =
+    generatedCode !== null &&
+    (executionState === 'error' || Boolean(executionError?.trim()) || Boolean(stderrOutput.trim()));
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
       {/* Back nav bar */}
@@ -240,10 +340,21 @@ export default function ModelDetailView() {
             <Button
               variant="secondary"
               onClick={generatedCode.trim() ? handleRegenerateCode : handleGenerateCode}
+              disabled={codeGenerating}
               style={{ fontSize: '12px', height: '28px', padding: '0 var(--space-md)' }}
             >
               {generatedCode.trim() ? 'Re-gen' : 'Generate Code'}
             </Button>
+            {showFixButton && (
+              <Button
+                variant="secondary"
+                onClick={handleFixCode}
+                disabled={codeGenerating}
+                style={{ fontSize: '12px', height: '28px', padding: '0 var(--space-md)' }}
+              >
+                Fix
+              </Button>
+            )}
           </div>
         )}
       </div>
