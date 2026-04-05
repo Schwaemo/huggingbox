@@ -117,6 +117,7 @@ interface AppStore {
   searchQuery: string;
   pipelineFilter: string | null;
   sizeFilter: string | null;
+  sortFilter: 'trendingScore' | 'downloads' | 'likes' | 'lastModified';
   models: HFModel[];
   modelsPage: number;
   modelsHasMore: boolean;
@@ -167,6 +168,7 @@ interface AppStore {
   setSearchQuery: (q: string) => void;
   setPipelineFilter: (f: string | null) => void;
   setSizeFilter: (f: string | null) => void;
+  setSortFilter: (f: AppStore['sortFilter']) => void;
   setModels: (models: HFModel[]) => void;
   appendModels: (models: HFModel[]) => void;
   setModelsPage: (page: number) => void;
@@ -214,6 +216,7 @@ export const useAppStore = create<AppStore>((set) => ({
   searchQuery: '',
   pipelineFilter: null,
   sizeFilter: null,
+  sortFilter: 'trendingScore',
   models: [],
   modelsPage: 0,
   modelsHasMore: true,
@@ -330,6 +333,7 @@ export const useAppStore = create<AppStore>((set) => ({
   setSearchQuery: (q) => set({ searchQuery: q }),
   setPipelineFilter: (f) => set({ pipelineFilter: f }),
   setSizeFilter: (f) => set({ sizeFilter: f }),
+  setSortFilter: (f) => set({ sortFilter: f }),
   setModels: (models) => set({ models }),
   appendModels: (models) =>
     set((s) => ({ models: [...s.models, ...models] })),

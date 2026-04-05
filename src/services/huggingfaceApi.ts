@@ -8,6 +8,7 @@ export interface FetchModelsParams {
   pipeline_tag?: string;
   page?: number;
   limit?: number;
+  sort?: 'trendingScore' | 'downloads' | 'likes' | 'lastModified';
 }
 
 export type RecommendedRuntime =
@@ -33,14 +34,14 @@ export async function fetchModels(
   hfToken?: string,
   signal?: AbortSignal
 ): Promise<HFModel[]> {
-  const { search, pipeline_tag, page = 0, limit = PAGE_SIZE } = params;
+  const { search, pipeline_tag, page = 0, limit = PAGE_SIZE, sort = 'trendingScore' } = params;
 
   const query = new URLSearchParams();
   if (search) query.set('search', search);
   if (pipeline_tag) query.set('pipeline_tag', pipeline_tag);
   query.set('limit', String(limit));
   query.set('offset', String(page * limit));
-  query.set('sort', 'downloads');
+  query.set('sort', sort);
   query.set('direction', '-1');
   // Request full metadata
   query.set('full', 'true');
@@ -315,6 +316,13 @@ export const PIPELINE_OPTIONS = [
   { label: 'Text to Image', value: 'text-to-image' },
   { label: 'Visual QA', value: 'visual-question-answering' },
   { label: 'Feature Extraction', value: 'feature-extraction' },
+];
+
+export const SORT_OPTIONS = [
+  { label: 'Trending', value: 'trendingScore' },
+  { label: 'Most Downloads', value: 'downloads' },
+  { label: 'Most Likes', value: 'likes' },
+  { label: 'Recently Updated', value: 'lastModified' },
 ];
 
 export const SIZE_OPTIONS = [

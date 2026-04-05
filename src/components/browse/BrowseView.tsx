@@ -1,7 +1,8 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { AlertCircle, RefreshCw } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
-import { fetchModels, modelMatchesSizeFilter, PIPELINE_OPTIONS, SIZE_OPTIONS } from '../../services/huggingfaceApi';
+import { fetchModels, modelMatchesSizeFilter, PIPELINE_OPTIONS, SIZE_OPTIONS, SORT_OPTIONS } from '../../services/huggingfaceApi';
+import type { FetchModelsParams } from '../../services/huggingfaceApi';
 import ModelCard from './ModelCard';
 import SearchBar from './SearchBar';
 import FilterDropdown from './FilterDropdown';
@@ -20,6 +21,7 @@ export default function BrowseView() {
     searchQuery,
     pipelineFilter,
     sizeFilter,
+    sortFilter,
     browseScrollPosition,
     setModels,
     appendModels,
@@ -29,6 +31,7 @@ export default function BrowseView() {
     setModelsError,
     setPipelineFilter,
     setSizeFilter,
+    setSortFilter,
     setBrowseScrollPosition,
     settings,
   } = useAppStore();
@@ -46,7 +49,7 @@ export default function BrowseView() {
   }, []);
 
   const loadModels = useCallback(
-    async (reset: boolean, search: string, pipeline: string | null, page: number) => {
+    async (reset: boolean, search: string, pipeline: string | null, page: number, sort?: FetchModelsParams['sort']) => {
       // Cancel any in-flight request immediately
       if (abortRef.current) {
         abortRef.current.abort();
@@ -64,6 +67,7 @@ export default function BrowseView() {
             pipeline_tag: pipeline || undefined,
             page,
             limit: PAGE_SIZE,
+            sort: sort ?? sortFilter,
           },
           settings.hfToken || undefined,
           controller.signal
@@ -95,7 +99,7 @@ export default function BrowseView() {
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [sizeFilter, settings.hfToken]
+    [sizeFilter, sortFilter, settings.hfToken]
   );
 
   // Initial load
@@ -118,6 +122,12 @@ export default function BrowseView() {
   function handleSizeChange(val: string) {
     setSizeFilter(val || null);
     loadModels(true, searchQuery, pipelineFilter, 0);
+  }
+
+  function handleSortChange(val: string) {
+    const sort = (val || 'trendingScore') as FetchModelsParams['sort'];
+    setSortFilter(sort!);
+    loadModels(true, searchQuery, pipelineFilter, 0, sort);
   }
 
   function handleLoadMore() {
@@ -167,6 +177,12 @@ export default function BrowseView() {
           value={sizeFilter ?? ''}
           onChange={handleSizeChange}
           placeholder="Size"
+        />
+        <FilterDropdown
+          options={SORT_OPTIONS}
+          value={sortFilter}
+          onChange={handleSortChange}
+          placeholder="Sort"
         />
       </div>
 
