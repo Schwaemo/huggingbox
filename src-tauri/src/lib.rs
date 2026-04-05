@@ -707,11 +707,44 @@ fn detect_gpu_windows() -> Option<(String, u64)> {
 
                 let mut command = std::process::Command::new("powershell");
                 apply_no_window_std(&mut command);
+                let ps_script = r#"
+$adapters = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0*" -ErrorAction SilentlyContinue
+$res = @()
+foreach ($a in $adapters) {
+    if (!$a.DriverDesc -or $a.DriverDesc -match 'Virtual|Basic Render|Remote Display|Parsec') { continue }
+    $ram = 0
+    if ($a."HardwareInformation.qwMemorySize") {
+        $ram = $a."HardwareInformation.qwMemorySize"
+    } elseif ($a."HardwareInformation.MemorySize") {
+        $val = $a."HardwareInformation.MemorySize"
+        if ($val -is [byte[]] -and $val.Length -ge 8) {
+            $ram = [BitConverter]::ToInt64($val, 0)
+        } elseif ($val -is [byte[]] -and $val.Length -ge 4) {
+            $ram = [BitConverter]::ToInt32($val, 0)
+        } else {
+            try { $ram = [long]$val } catch {}
+        }
+    }
+    if ($ram -gt 0) {
+        $res += [PSCustomObject]@{ Name=$a.DriverDesc; AdapterRAM=([long]$ram) }
+    }
+}
+if ($res.Length -eq 0) {
+    $gpus = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue
+    if ($gpus) {
+        foreach ($g in $gpus) {
+            if ($g.Name -match 'Virtual|Basic Render|Remote Display|Parsec') { continue }
+            $res += [PSCustomObject]@{ Name=$g.Name; AdapterRAM=([long]$g.AdapterRAM) }
+        }
+    }
+}
+$res | ConvertTo-Json -Compress
+"#;
                 let output = command
                     .args([
                         "-NoProfile",
                         "-Command",
-                        "Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM | ConvertTo-Json -Compress",
+                        ps_script,
                     ])
                     .output()
                     .ok()?;

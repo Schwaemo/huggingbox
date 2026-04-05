@@ -375,7 +375,17 @@ export const useAppStore = create<AppStore>((set) => ({
   setSystemInfo: (info) =>
     set((s) => ({ systemInfo: { ...s.systemInfo, ...info } })),
   updateSettings: (patch) =>
-    set((s) => ({ settings: { ...s.settings, ...patch } })),
+    set((s) => {
+      const newSettings = { ...s.settings, ...patch };
+      if (
+        patch.claudeApiKey !== undefined &&
+        patch.claudeApiKey.trim() !== '' &&
+        s.settings.codeGenerationProvider === 'autorunner'
+      ) {
+        newSettings.codeGenerationProvider = 'claude-sonnet';
+      }
+      return { settings: newSettings };
+    }),
   setTheme: (theme) =>
     set((s) => ({ settings: { ...s.settings, theme } })),
 
