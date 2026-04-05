@@ -251,11 +251,9 @@ async fn find_python(app: &AppHandle) -> Result<String, String> {
         if !candidate.exists() {
             continue;
         }
-        if let Ok(output) = tokio::process::Command::new(&candidate)
-            .arg("--version")
-            .output()
-            .await
-        {
+        let mut cmd = tokio::process::Command::new(&candidate);
+        apply_no_window_tokio(&mut cmd);
+        if let Ok(output) = cmd.arg("--version").output().await {
             if output.status.success() {
                 return Ok(candidate.to_string_lossy().to_string());
             }
@@ -263,11 +261,9 @@ async fn find_python(app: &AppHandle) -> Result<String, String> {
     }
 
     for candidate in ["python3", "python"] {
-        if let Ok(output) = tokio::process::Command::new(candidate)
-            .arg("--version")
-            .output()
-            .await
-        {
+        let mut cmd = tokio::process::Command::new(candidate);
+        apply_no_window_tokio(&mut cmd);
+        if let Ok(output) = cmd.arg("--version").output().await {
             if output.status.success() {
                 return Ok(candidate.to_string());
             }
@@ -363,7 +359,9 @@ fn resolve_ffmpeg_path(app: &AppHandle) -> Option<String> {
         }
     }
 
-    if std::process::Command::new(binary)
+    let mut probe = std::process::Command::new(binary);
+    apply_no_window_std(&mut probe);
+    if probe
         .arg("-version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -423,11 +421,9 @@ async fn ensure_venv_python_at_dir(app: &AppHandle, venv_dir: &PathBuf) -> Resul
     let python_path = venv_python_path(&venv_dir);
 
     if python_path.exists() {
-        if let Ok(out) = tokio::process::Command::new(&python_path)
-            .arg("--version")
-            .output()
-            .await
-        {
+        let mut cmd = tokio::process::Command::new(&python_path);
+        apply_no_window_tokio(&mut cmd);
+        if let Ok(out) = cmd.arg("--version").output().await {
             if out.status.success() {
                 return Ok(python_path.to_string_lossy().to_string());
             }
@@ -440,7 +436,9 @@ async fn ensure_venv_python_at_dir(app: &AppHandle, venv_dir: &PathBuf) -> Resul
     }
 
     let base_python = find_python(app).await?;
-    let create = tokio::process::Command::new(&base_python)
+    let mut create_cmd = tokio::process::Command::new(&base_python);
+    apply_no_window_tokio(&mut create_cmd);
+    let create = create_cmd
         .args(["-m", "venv", &venv_dir.to_string_lossy()])
         .output()
         .await
@@ -456,14 +454,18 @@ async fn ensure_venv_python_at_dir(app: &AppHandle, venv_dir: &PathBuf) -> Resul
     }
 
     // Ensure pip is available in the venv before package checks/installs.
-    let pip_ok = tokio::process::Command::new(&python_path)
+    let mut pip_cmd = tokio::process::Command::new(&python_path);
+    apply_no_window_tokio(&mut pip_cmd);
+    let pip_ok = pip_cmd
         .args(["-m", "pip", "--version"])
         .output()
         .await
         .map(|o| o.status.success())
         .unwrap_or(false);
     if !pip_ok {
-        let _ = tokio::process::Command::new(&python_path)
+        let mut ensurepip_cmd = tokio::process::Command::new(&python_path);
+        apply_no_window_tokio(&mut ensurepip_cmd);
+        let _ = ensurepip_cmd
             .args(["-m", "ensurepip", "--upgrade"])
             .output()
             .await;
@@ -938,7 +940,9 @@ fn list_gpus() -> Vec<GpuInfoPayload> {
 
     #[cfg(target_os = "windows")]
     {
-        let output = std::process::Command::new("powershell")
+        let mut ps_cmd = std::process::Command::new("powershell");
+        apply_no_window_std(&mut ps_cmd);
+        let output = ps_cmd
             .args([
                 "-NoProfile",
                 "-Command",
@@ -1089,6 +1093,7 @@ async fn detect_python(app: AppHandle) -> PythonInfo {
 async fn generate_python_code_local(app: AppHandle, model_id: String, hf_token: Option<String>) -> Result<String, String> {
     let python = find_python(&app).await?;
     let mut cmd = tokio::process::Command::new(&python);
+    apply_no_window_tokio(&mut cmd);
     cmd.env("HB_DEBUG", "1");
     if let Some(pypath) = hf_auto_runner_parent_dir(&app) {
         cmd.env("PYTHONPATH", pypath.to_string_lossy().to_string());
@@ -1302,6 +1307,7 @@ async fn run_python_code(
     let python = resolve_python(&app, execution_env_model.as_deref()).await?;
 
     let mut command = tokio::process::Command::new(&python);
+    apply_no_window_tokio(&mut command);
     command
         .env("PYTHONIOENCODING", "utf-8")
         .env("PYTHONUTF8", "1")
@@ -1790,7 +1796,9 @@ print("[HuggingBox] Download complete.", flush=True)
     std::fs::write(&script_path, script).map_err(|e| e.to_string())?;
 
     let token = hf_token.unwrap_or_default();
-    let mut child = tokio::process::Command::new(&python)
+    let mut dl_cmd = tokio::process::Command::new(&python);
+    apply_no_window_tokio(&mut dl_cmd);
+    let mut child = dl_cmd
         .arg(script_path.to_str().ok_or("invalid path")?)
         .arg(model_id.clone())
         .arg(model_dir.to_string_lossy().to_string())
@@ -2153,7 +2161,9 @@ async fn check_packages(
 
     for pkg in &packages {
         let import_target = import_name_for_requirement(pkg);
-        let result = tokio::process::Command::new(&python)
+        let mut chk_cmd = tokio::process::Command::new(&python);
+        apply_no_window_tokio(&mut chk_cmd);
+        let result = chk_cmd
             .args(["-c", &format!("import {}", import_target)])
             .output()
             .await
@@ -2437,7 +2447,9 @@ print("HB_PROBE_JSON:" + json.dumps({
     std::fs::write(&script_path, script).map_err(|e| e.to_string())?;
 
     let token = hf_token.unwrap_or_default();
-    let output = tokio::process::Command::new(&python)
+    let mut probe_cmd = tokio::process::Command::new(&python);
+    apply_no_window_tokio(&mut probe_cmd);
+    let output = probe_cmd
         .env("PYTHONIOENCODING", "utf-8")
         .env("PYTHONUTF8", "1")
         .arg(script_path.to_string_lossy().to_string())
@@ -2524,7 +2536,9 @@ async fn run_pip_install_with_progress(
     python: &str,
     args: Vec<String>,
 ) -> Result<(), String> {
-    let mut child = tokio::process::Command::new(python)
+    let mut pip_install_cmd = tokio::process::Command::new(python);
+    apply_no_window_tokio(&mut pip_install_cmd);
+    let mut child = pip_install_cmd
         .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -2787,17 +2801,21 @@ $hbExit = $LASTEXITCODE; \
 if ($null -eq $hbExit) { $hbExit = 0 }; \
 Write-Output ('__HB_CWD__:' + (Get-Location).Path); \
 exit $hbExit";
-        tokio::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command", script])
-            .env("PATH", &path_with_venv)
-            .env("VIRTUAL_ENV", venv_dir.to_string_lossy().to_string())
-            .env("HB_VENV_PYTHON", venv_python.to_string_lossy().to_string())
-            .env("HB_SHELL_COMMAND", trimmed)
-            .env("HF_TOKEN", hf_token.unwrap_or_default())
-            .current_dir(&command_cwd)
-            .output()
-            .await
-            .map_err(|e| format!("Failed to execute shell command: {}", e))?
+        {
+            let mut shell_cmd = tokio::process::Command::new("powershell");
+            apply_no_window_tokio(&mut shell_cmd);
+            shell_cmd
+                .args(["-NoProfile", "-Command", script])
+                .env("PATH", &path_with_venv)
+                .env("VIRTUAL_ENV", venv_dir.to_string_lossy().to_string())
+                .env("HB_VENV_PYTHON", venv_python.to_string_lossy().to_string())
+                .env("HB_SHELL_COMMAND", trimmed)
+                .env("HF_TOKEN", hf_token.unwrap_or_default())
+                .current_dir(&command_cwd)
+                .output()
+                .await
+                .map_err(|e| format!("Failed to execute shell command: {}", e))?
+        }
     };
 
     #[cfg(not(target_os = "windows"))]
