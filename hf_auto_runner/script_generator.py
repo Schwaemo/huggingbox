@@ -170,6 +170,9 @@ class ScriptGenerator:
         if self.runtime == "onnxruntime":
             return self._onnxruntime_template()
         if self.runtime == "diffusers":
+            # AMD/Intel: use stable-diffusion-cpp-python with Vulkan (installed in Sprint 3)
+            if self.gpu_backend in ("amd", "intel"):
+                return self._sd_cpp_template()
             return self._diffusers_template()
         if self.runtime == "transformers_multimodal":
             return self._multimodal_template()
@@ -187,6 +190,94 @@ class ScriptGenerator:
             f"# RUNTIME: {self.runtime}\n"
             f"# PIPELINE: {pipeline_tag}\n"
         )
+
+    def _device_init_code(self) -> str:
+        """Return a Python code block that sets `device` and `torch_dtype`.
+
+        The returned string is embedded verbatim in generated scripts.
+        On AMD/Intel it tries DirectML and falls back to CPU.
+        On CUDA/CPU it uses the standard torch.cuda.is_available() check.
+
+        Note: {device} inside print() is a literal brace — it will be
+        expanded by the *generated* script's f-string, not here.
+        """
+        if self.gpu_backend in ("amd", "intel"):
+            return (
+                'if torch.cuda.is_available():\n'
+                '    device = "cuda"\n'
+                '    torch_dtype = torch.float16\n'
+                'else:\n'
+                '    try:\n'
+                '        import torch_directml\n'
+                '        device = torch_directml.device()\n'
+                '        torch_dtype = torch.float16\n'
+                '    except ImportError:\n'
+                '        device = "cpu"\n'
+                '        torch_dtype = torch.float32\n'
+                'print(f"[HuggingBox] Device: {device}", flush=True)'
+            )
+        return (
+            'device = "cuda" if torch.cuda.is_available() else "cpu"\n'
+            'torch_dtype = torch.float16 if device == "cuda" else torch.float32'
+        )
+
+    def _sd_cpp_template(self) -> str:
+        """Stable Diffusion via stable-diffusion-cpp-python (Vulkan) for AMD/Intel."""
+        filenames = self.metadata.get("filenames", [])
+
+        # Prefer consolidated safetensors weights; exclude component-only files.
+        _COMPONENT_NAMES = ("vae", "text_encoder", "safety", "feature", "tokenizer",
+                            "scheduler", "unet", "controlnet")
+        safetensors = sorted([
+            f for f in filenames
+            if isinstance(f, str) and f.lower().endswith(".safetensors")
+            and not any(c in f.lower() for c in _COMPONENT_NAMES)
+        ])
+        ckpts = sorted([
+            f for f in filenames
+            if isinstance(f, str) and (f.lower().endswith(".ckpt") or f.lower().endswith(".pt"))
+            and not any(c in f.lower() for c in _COMPONENT_NAMES)
+        ])
+        weights_file = (safetensors[0] if safetensors else ckpts[0] if ckpts else None)
+        weights_repr = repr(weights_file)
+
+        return self._metadata_header() + f"""
+import os
+from huggingface_hub import hf_hub_download
+from stable_diffusion_cpp import StableDiffusion
+
+model_id = "{self.model_id}"
+hf_token = os.environ.get("HF_TOKEN") or None
+
+# Weights file selected at code-generation time
+weights_file = {weights_repr}
+if not weights_file:
+    raise RuntimeError("No .safetensors or .ckpt weights found in repo!")
+
+print("[HuggingBox] Backend:  stable-diffusion-cpp / Vulkan", flush=True)
+print(f"Downloading {{weights_file}}...", flush=True)
+model_path = hf_hub_download(repo_id=model_id, filename=weights_file, token=hf_token)
+
+print("Loading model...", flush=True)
+sd = StableDiffusion(model_path=model_path, verbose=False)
+
+prompt = os.environ.get("HB_INPUT", "").strip() or "A majestic mountain landscape at sunset"
+output_dir = os.environ.get("HB_OUTPUT_DIR", ".")
+os.makedirs(output_dir, exist_ok=True)
+
+print(f"Generating image for: {{prompt}}", flush=True)
+results = sd.txt_to_img(
+    prompt=prompt,
+    width=512,
+    height=512,
+    sample_steps=20,
+)
+
+out_path = os.path.join(output_dir, "output.png")
+results[0].save(out_path)
+print(f"HB_OUTPUT_IMAGE:{{out_path}}", flush=True)
+print(f"[HuggingBox] Saved: {{out_path}}", flush=True)
+"""
 
     def _llama_cpp_template(self) -> str:
         filenames = self.metadata.get("filenames", [])
@@ -317,6 +408,9 @@ def _providers():
     available = set(ort.get_available_providers())
     if "CUDAExecutionProvider" in available:
         return ["CUDAExecutionProvider", "CPUExecutionProvider"], "CUDAExecutionProvider"
+    if "DmlExecutionProvider" in available:
+        # onnxruntime-directml is installed (Sprint 3); use DirectML on AMD/Intel
+        return ["DmlExecutionProvider", "CPUExecutionProvider"], "DmlExecutionProvider"
     return ["CPUExecutionProvider"], "CPUExecutionProvider"
 
 
@@ -728,6 +822,7 @@ print("Diffusion generation completed successfully.", flush=True)
     def _multimodal_template(self) -> str:
         pipeline_tag = (self.metadata.get("pipeline_tag") or "").lower()
         model_type = (self.metadata.get("config", {}).get("model_type") or "").lower()
+        device_init = self._device_init_code()
         return self._metadata_header() + "# MULTIMODAL_TASK: auto\n" + f"""
 import json
 import os
@@ -743,8 +838,7 @@ pipeline_tag = "{pipeline_tag}"
 model_type = "{model_type}"
 architecture_name = "{self.architecture}"
 hf_token = os.environ.get("HF_TOKEN") or None
-device = "cuda" if torch.cuda.is_available() else "cpu"
-torch_dtype = torch.float16 if device == "cuda" else torch.float32
+{device_init}
 
 
 def _default_task() -> str:
@@ -976,6 +1070,7 @@ except Exception as e:
     def _audio_template(self) -> str:
         pipeline_tag = (self.metadata.get("pipeline_tag") or "").lower()
         model_type = (self.metadata.get("config", {}).get("model_type") or "").lower()
+        device_init = self._device_init_code()
         return self._metadata_header() + f"""
 import json
 import os
@@ -995,8 +1090,7 @@ pipeline_tag = "{pipeline_tag}"
 model_type = "{model_type}"
 hf_token = os.environ.get("HF_TOKEN") or None
 hb_input = os.environ.get("HB_INPUT", "").strip()
-device = 0 if torch.cuda.is_available() else -1
-torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+{device_init}
 
 
 def _ffmpeg_executable():
@@ -1225,6 +1319,12 @@ except Exception as e:
 """
 
     def _llm_template(self) -> str:
+        device_init = self._device_init_code()
+        advisory = (
+            'print("[HuggingBox] Note: Large safetensor LLMs (7B+) run slowly on AMD via DirectML. '
+            'Consider a GGUF variant for better performance.", flush=True)\n'
+            if self.gpu_backend == "amd" else ""
+        )
         return self._metadata_header() + f"""
 import os
 import time
@@ -1234,14 +1334,14 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 model_id = "{self.model_id}"
 hf_token = os.environ.get("HF_TOKEN") or None
-device = "cuda" if torch.cuda.is_available() else "cpu"
-
-print(f"Loading LLM {{model_id}} onto {{device}}...")
+{device_init}
+{advisory}
+print(f"Loading LLM {{model_id}} onto {{device}}...", flush=True)
 try:
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True, token=hf_token)
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
-        torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+        torch_dtype=torch_dtype,
         trust_remote_code=True,
         token=hf_token
     ).to(device)
@@ -1306,6 +1406,7 @@ except Exception as e:
 """
 
     def _generic_template(self) -> str:
+        device_init = self._device_init_code()
         return self._metadata_header() + f"""
 import os
 
@@ -1314,11 +1415,11 @@ from transformers import pipeline
 
 model_id = "{self.model_id}"
 hf_token = os.environ.get("HF_TOKEN") or None
-device = "cuda" if torch.cuda.is_available() else "cpu"
+{device_init}
 
-print(f"Loading generic pipeline for {{model_id}}...")
+print(f"Loading generic pipeline for {{model_id}}...", flush=True)
 try:
-    pipe = pipeline(model=model_id, device=0 if device == "cuda" else -1, token=hf_token)
+    pipe = pipeline(model=model_id, device=device, token=hf_token)
 
     print(f"Pipeline created: {{pipe.task}}")
     print("Due to lack of metadata, automatic inference cannot deduce input type.")
