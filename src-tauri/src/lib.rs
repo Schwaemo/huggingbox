@@ -1144,12 +1144,18 @@ async fn generate_python_code_local(app: AppHandle, model_id: String, hf_token: 
             cmd.env("HF_TOKEN", token);
         }
     }
-    // Forward GPU vendor so the script generator can bake hardware-specific code
-    let gpu_backend_generate = detect_gpu_windows()
+    // Forward GPU vendor + VRAM so the script generator can bake hardware-specific code
+    let gpu_info_generate = detect_gpu_windows();
+    let gpu_backend_generate = gpu_info_generate
         .as_ref()
         .map(|g| classify_vendor(&g.0))
         .unwrap_or_else(|| "cpu".to_string());
+    let gpu_vram_bytes_generate = gpu_info_generate
+        .as_ref()
+        .map(|g| g.1.saturating_mul(1_073_741_824u64))
+        .unwrap_or(0u64);
     cmd.env("HB_GPU_BACKEND", &gpu_backend_generate);
+    cmd.env("HB_GPU_VRAM_BYTES", gpu_vram_bytes_generate.to_string());
     let mut args = vec!["-m".to_string(), "hf_auto_runner".to_string(), "generate".to_string(), model_id.clone()];
     if let Some(ref token) = hf_token {
         if !token.is_empty() {
@@ -1388,13 +1394,19 @@ async fn run_python_code(
         }
     }
 
-    // Forward GPU vendor to Python so DependencyManager and ScriptGenerator
+    // Forward GPU vendor + VRAM to Python so DependencyManager and ScriptGenerator
     // can install the correct wheels and generate hardware-specific code.
-    let gpu_backend_run = detect_gpu_windows()
+    let gpu_info_run = detect_gpu_windows();
+    let gpu_backend_run = gpu_info_run
         .as_ref()
         .map(|g| classify_vendor(&g.0))
         .unwrap_or_else(|| "cpu".to_string());
+    let gpu_vram_bytes_run = gpu_info_run
+        .as_ref()
+        .map(|g| g.1.saturating_mul(1_073_741_824u64))
+        .unwrap_or(0u64);
     command.env("HB_GPU_BACKEND", &gpu_backend_run);
+    command.env("HB_GPU_VRAM_BYTES", gpu_vram_bytes_run.to_string());
 
     // Pass user input as env var for the inference script
     if let Some(ref input) = user_input {

@@ -1,5 +1,136 @@
 import os
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
+
+# Quant priority table: (minimum_vram_bytes, filename_substring).
+# Mirrors LM Studio's selection logic — pick the highest quality that fits in VRAM.
+_QUANT_PRIORITY = [
+    (17_000_000_000, "Q8_0"),
+    (12_000_000_000, "Q6_K"),
+    ( 8_000_000_000, "Q5_K_M"),
+    ( 5_000_000_000, "Q4_K_M"),
+    ( 3_500_000_000, "Q3_K_M"),
+    (             0, "Q2_K"),
+]
+
+# Default quant when VRAM is unknown (0). Q4_K_M is the "LM Studio default".
+_DEFAULT_QUANT = "Q4_K_M"
+
+
+def _pick_gguf(filenames: List[Any], vram_bytes: int) -> Optional[str]:
+    """Return the best GGUF filename for the available VRAM.
+
+    Selection logic:
+      - Walk _QUANT_PRIORITY from highest to lowest quality.
+      - Pick the first quant whose vram_min fits in vram_bytes.
+      - If vram_bytes == 0 (unknown), try the default quant, then any GGUF.
+      - If no quant substring matches, return the lexicographically smallest .gguf.
+    """
+    gguf_files = [f for f in filenames if isinstance(f, str) and f.lower().endswith(".gguf")]
+    if not gguf_files:
+        return None
+
+    effective_vram = vram_bytes
+    if effective_vram == 0:
+        # VRAM unknown — try the safe default first, then fall through normally
+        match = next((f for f in gguf_files if _DEFAULT_QUANT.lower() in f.lower()), None)
+        if match:
+            return match
+        # No Q4_K_M found; return the smallest file as a best-effort pick
+        return sorted(gguf_files)[0]
+
+    for vram_min, substr in _QUANT_PRIORITY:
+        if effective_vram >= vram_min:
+            match = next((f for f in gguf_files if substr.lower() in f.lower()), None)
+            if match:
+                return match
+
+    # Nothing matched at all — return the smallest file
+    return sorted(gguf_files)[0]
+
+
+# Map of GGUF quantisation substrings → effective bits per weight.
+# Used to estimate model footprint for layer-offload calculations.
+_QUANT_BITS: List[tuple] = [
+    ("Q8_0",   8),
+    ("Q6_K",   6),
+    ("Q5_K",   5), ("Q5_0", 5),
+    ("Q4_K",   4), ("Q4_0", 4),
+    ("Q3_K",   3),
+    ("Q2_K",   2),
+    ("F16",   16),
+    ("BF16",  16),
+    ("F32",   32),
+]
+
+
+def _quant_bits_from_filename(filename: Optional[str]) -> int:
+    """Return the effective bits-per-weight for a GGUF filename, defaulting to 4."""
+    if not filename:
+        return 4
+    upper = filename.upper()
+    for substr, bits in _QUANT_BITS:
+        if substr in upper:
+            return bits
+    return 4
+
+
+def _estimate_param_billions(model_id: str, gguf_filename: Optional[str], config: dict) -> float:
+    """Estimate model parameter count in billions.
+
+    Priority:
+      1. Parse a size token (e.g. '7B', '13B') from the GGUF filename or model ID.
+      2. Derive from config.json fields (rough transformer formula).
+      3. Fall back to 7B as a safe default.
+    """
+    import re
+    for text in [gguf_filename or "", model_id]:
+        # Match patterns like 0.5B 1B 1.5B 3B 7B 8B 13B 14B 30B 34B 70B 72B 405B
+        m = re.search(r'(\d+(?:\.\d+)?)\s*[Bb]', text)
+        if m:
+            val = float(m.group(1))
+            if 0.1 <= val <= 1000:
+                return val
+
+    # Rough formula: params ≈ 12 * num_layers * hidden_size²  (dominant transformer term)
+    num_layers = config.get("num_hidden_layers") or config.get("n_layer") or 0
+    hidden_size = config.get("hidden_size") or config.get("n_embd") or 0
+    if num_layers and hidden_size:
+        approx = 12 * num_layers * (hidden_size ** 2) / 1e9
+        if 0.1 <= approx <= 1000:
+            return round(approx, 1)
+
+    return 7.0  # safe fallback
+
+
+def _calc_gpu_layers(
+    param_billions: float,
+    vram_bytes: int,
+    quant_bits: int,
+    num_layers: int,
+) -> int:
+    """Return the number of transformer layers to offload to GPU.
+
+    Returns -1 for full offload, 0 if VRAM is unknown or insufficient for even
+    one layer.  Leaves 10 % of VRAM as headroom for activations and KV cache.
+    """
+    if vram_bytes <= 0:
+        return -1  # VRAM unknown — attempt full offload, let the runtime OOM-guard handle it
+
+    usable_vram = vram_bytes * 0.90
+    bytes_per_param = quant_bits / 8.0
+    total_model_bytes = param_billions * 1e9 * bytes_per_param
+
+    if usable_vram >= total_model_bytes:
+        return -1  # model fits entirely in VRAM
+
+    if num_layers <= 0:
+        num_layers = 32  # typical for 7B models
+
+    bytes_per_layer = total_model_bytes / num_layers
+    if bytes_per_layer <= 0:
+        return -1
+
+    return max(1, int(usable_vram / bytes_per_layer))
 
 
 class ScriptGenerator:
@@ -58,6 +189,47 @@ class ScriptGenerator:
         )
 
     def _llama_cpp_template(self) -> str:
+        filenames = self.metadata.get("filenames", [])
+        config = self.metadata.get("config", {})
+
+        # ── GGUF file selection (Sprint 3) ────────────────────────────────────
+        gguf_file = _pick_gguf(filenames, self.gpu_vram_bytes)
+        gguf_repr = repr(gguf_file)
+
+        # ── Hardware labels ───────────────────────────────────────────────────
+        vram_label = (
+            f"{self.gpu_vram_bytes // 1_073_741_824} GB"
+            if self.gpu_vram_bytes > 0
+            else "unknown"
+        )
+        backend_label = {
+            "cuda":  "llama.cpp / CUDA",
+            "amd":   "llama.cpp / Vulkan",
+            "intel": "llama.cpp / Vulkan",
+        }.get(self.gpu_backend, "llama.cpp / CPU")
+
+        # ── Sprint 4: GPU layer offload calculation ───────────────────────────
+        quant_bits = _quant_bits_from_filename(gguf_file)
+        param_b = _estimate_param_billions(self.model_id, gguf_file, config)
+        num_layers = int(
+            config.get("num_hidden_layers")
+            or config.get("n_layer")
+            or 32
+        )
+        n_gpu_layers = _calc_gpu_layers(param_b, self.gpu_vram_bytes, quant_bits, num_layers)
+
+        offload_label = "full" if n_gpu_layers == -1 else f"{n_gpu_layers}/{num_layers} layers"
+
+        # ── Sprint 4: flash attention (NVIDIA Ampere/Ada only) ────────────────
+        # flash_attn halves KV VRAM on long contexts and boosts throughput ~20%.
+        # Vulkan backend does not support it yet — keep False for AMD/Intel.
+        flash_attn = self.gpu_backend == "cuda"
+
+        # ── Sprint 4: KV cache quantisation ──────────────────────────────────
+        # type_k/v=8 stores KV cache in Q8_0 — ~40% VRAM saving vs FP16 at 4k ctx.
+        # Safe on all backends (CUDA, Vulkan, CPU).
+        kv_type = 8
+
         return self._metadata_header() + f"""
 import os
 import time
@@ -66,20 +238,32 @@ from huggingface_hub import hf_hub_download
 model_id = "{self.model_id}"
 hf_token = os.environ.get("HF_TOKEN") or None
 
-print("Finding GGUF file for llama.cpp...")
-filenames = {self.metadata.get("filenames", [])}
-gguf_file = next((f for f in filenames if f.endswith(".gguf")), None)
+# GGUF file selected at code-generation time
+# VRAM detected: {vram_label}  |  Model: ~{param_b:.1f}B params  |  Quant: {quant_bits}-bit
+gguf_file = {gguf_repr}
 
 if not gguf_file:
     raise RuntimeError("No GGUF file found in repo!")
 
-print(f"Downloading {{gguf_file}}...")
+print(f"[HuggingBox] Selected: {{gguf_file}}", flush=True)
+print(f"[HuggingBox] Backend:  {backend_label}", flush=True)
+print(f"[HuggingBox] VRAM:     {vram_label}  |  Offload: {offload_label}", flush=True)
+print(f"[HuggingBox] Options:  flash_attn={flash_attn}  kv_cache=Q{kv_type}_0", flush=True)
+print(f"Downloading {{gguf_file}}...", flush=True)
 model_path = hf_hub_download(repo_id=model_id, filename=gguf_file, token=hf_token)
 
 from llama_cpp import Llama
 print("Loading model...", flush=True)
 _load_start = time.perf_counter()
-llm = Llama(model_path=model_path, n_gpu_layers=-1, n_ctx=4096, verbose=False)
+llm = Llama(
+    model_path=model_path,
+    n_gpu_layers={n_gpu_layers},
+    n_ctx=4096,
+    flash_attn={flash_attn},
+    type_k={kv_type},
+    type_v={kv_type},
+    verbose=False,
+)
 _load_elapsed = time.perf_counter() - _load_start
 print(f"[HuggingBox] Loaded in {{_load_elapsed:.1f}}s", flush=True)
 
