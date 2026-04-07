@@ -3,11 +3,21 @@ from typing import Any, Dict
 
 
 class ScriptGenerator:
-    def __init__(self, model_id: str, metadata: Dict[str, Any], runtime: str, architecture: str):
+    def __init__(
+        self,
+        model_id: str,
+        metadata: Dict[str, Any],
+        runtime: str,
+        architecture: str,
+        gpu_backend: str = "cpu",
+        gpu_vram_bytes: int = 0,
+    ):
         self.model_id = model_id
         self.metadata = metadata
         self.runtime = runtime
         self.architecture = architecture
+        self.gpu_backend = gpu_backend
+        self.gpu_vram_bytes = gpu_vram_bytes
         self.has_processor = metadata.get("has_processor", False)
         self.has_tokenizer = metadata.get("has_tokenizer", False)
 

@@ -50,6 +50,41 @@ impl ExecutionHandle {
     }
 }
 
+// ─── GPU vendor classification ─────────────────────────────────────────────────
+
+/// Classify a GPU name string into a backend identifier.
+/// Returns one of: "cuda", "amd", "intel", "cpu".
+/// "cuda" is used for NVIDIA so the value maps directly to HB_GPU_BACKEND.
+fn classify_vendor(name: &str) -> String {
+    let lower = name.to_lowercase();
+    if lower.contains("nvidia")
+        || lower.contains("geforce")
+        || lower.contains("quadro")
+        || lower.contains("rtx")
+        || lower.contains("gtx")
+        || lower.contains("tesla")
+    {
+        "cuda".to_string()
+    } else if lower.contains("amd")
+        || lower.contains("radeon")
+        || lower.contains("rx ")
+        || lower.contains("vega")
+        || lower.contains("navi")
+        || lower.contains("polaris")
+    {
+        "amd".to_string()
+    } else if lower.contains("intel")
+        || lower.contains(" arc ")
+        || lower.contains("iris")
+        || lower.contains("uhd graphics")
+        || lower.contains("hd graphics")
+    {
+        "intel".to_string()
+    } else {
+        "cpu".to_string()
+    }
+}
+
 // ─── Payload types ────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -58,6 +93,9 @@ pub struct SystemInfoPayload {
     available_ram: u64,
     gpu_name: Option<String>,
     gpu_vram: Option<u64>,
+    /// One of: "cuda" (NVIDIA), "amd", "intel", "cpu" (unknown/no GPU).
+    /// Matches the HB_GPU_BACKEND env var values passed to Python subprocesses.
+    gpu_vendor: Option<String>,
     os_name: String,
 }
 
@@ -921,12 +959,14 @@ fn get_system_info() -> SystemInfoPayload {
     sys.refresh_memory();
 
     let gpu = detect_gpu_windows();
+    let gpu_vendor = gpu.as_ref().map(|g| classify_vendor(&g.0));
 
     SystemInfoPayload {
         total_ram: sys.total_memory(),
         available_ram: sys.available_memory(),
         gpu_name: gpu.as_ref().map(|g| g.0.clone()),
         gpu_vram: gpu.as_ref().map(|g| g.1),
+        gpu_vendor,
         os_name: System::long_os_version().unwrap_or_else(|| "Unknown OS".to_string()),
     }
 }
@@ -1104,6 +1144,12 @@ async fn generate_python_code_local(app: AppHandle, model_id: String, hf_token: 
             cmd.env("HF_TOKEN", token);
         }
     }
+    // Forward GPU vendor so the script generator can bake hardware-specific code
+    let gpu_backend_generate = detect_gpu_windows()
+        .as_ref()
+        .map(|g| classify_vendor(&g.0))
+        .unwrap_or_else(|| "cpu".to_string());
+    cmd.env("HB_GPU_BACKEND", &gpu_backend_generate);
     let mut args = vec!["-m".to_string(), "hf_auto_runner".to_string(), "generate".to_string(), model_id.clone()];
     if let Some(ref token) = hf_token {
         if !token.is_empty() {
@@ -1341,6 +1387,14 @@ async fn run_python_code(
             command.env("HF_TOKEN", token);
         }
     }
+
+    // Forward GPU vendor to Python so DependencyManager and ScriptGenerator
+    // can install the correct wheels and generate hardware-specific code.
+    let gpu_backend_run = detect_gpu_windows()
+        .as_ref()
+        .map(|g| classify_vendor(&g.0))
+        .unwrap_or_else(|| "cpu".to_string());
+    command.env("HB_GPU_BACKEND", &gpu_backend_run);
 
     // Pass user input as env var for the inference script
     if let Some(ref input) = user_input {

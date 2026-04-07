@@ -16,9 +16,10 @@ _TORCH_PKGS = {"torch", "torchvision", "torchaudio"}
 
 
 class DependencyManager:
-    def __init__(self, python_exec: str, runtime: str):
+    def __init__(self, python_exec: str, runtime: str, gpu_backend: str = "cpu"):
         self.python_exec = python_exec
         self.runtime = runtime
+        self.gpu_backend = gpu_backend
 
     def get_dependencies(self) -> List[str]:
         if self.runtime == "llama_cpp":

@@ -35,6 +35,9 @@ def main():
 
 def run_model(model_id: str, user_input: str = "", hf_token: str = ""):
     print(f"MODEL: {model_id}")
+
+    gpu_backend = os.environ.get("HB_GPU_BACKEND", "cpu").strip().lower()
+    _debug(f"HB_GPU_BACKEND={gpu_backend}")
     
     # Step 1: Fetch metadata
     inspector = ModelInspector(model_id, hf_token=hf_token or None)
@@ -47,6 +50,7 @@ def run_model(model_id: str, user_input: str = "", hf_token: str = ""):
     
     print(f"ARCHITECTURE: {architecture}")
     print(f"RUNTIME: {runtime}")
+    print(f"[HuggingBox] GPU backend: {gpu_backend}", flush=True)
     
     # Step 4: Create environment
     env_manager = EnvManager(model_id)
@@ -59,12 +63,17 @@ def run_model(model_id: str, user_input: str = "", hf_token: str = ""):
         print("DEPENDENCIES: skipped")
         _debug("dependency install skipped because HB_SKIP_DEP_INSTALL is set")
     else:
-        dep_manager = DependencyManager(python_exec, runtime)
+        dep_manager = DependencyManager(python_exec, runtime, gpu_backend=gpu_backend)
         dep_manager.install_dependencies()
         print("DEPENDENCIES: installed")
     
     # Step 6 & 7: Generate inference script
-    script_gen = ScriptGenerator(model_id, metadata, runtime, architecture)
+    gpu_vram_bytes = int(os.environ.get("HB_GPU_VRAM_BYTES", "0"))
+    script_gen = ScriptGenerator(
+        model_id, metadata, runtime, architecture,
+        gpu_backend=gpu_backend,
+        gpu_vram_bytes=gpu_vram_bytes,
+    )
     script_path = script_gen.generate_script(str(env_manager.env_dir))
     print("SCRIPT: generated")
     
@@ -101,9 +110,17 @@ def generate_model_script(model_id: str, hf_token: str = ""):
         architecture = router.get_architecture()
         runtime = router.get_runtime()
         _debug(f"routing complete architecture={architecture} runtime={runtime}")
+
+        gpu_backend = os.environ.get("HB_GPU_BACKEND", "cpu").strip().lower()
+        gpu_vram_bytes = int(os.environ.get("HB_GPU_VRAM_BYTES", "0"))
+        _debug(f"gpu_backend={gpu_backend} gpu_vram_bytes={gpu_vram_bytes}")
         
         # Don't instantiate venvs or deps. Just generate the raw script logic strings.
-        script_gen = ScriptGenerator(model_id, metadata, runtime, architecture)
+        script_gen = ScriptGenerator(
+            model_id, metadata, runtime, architecture,
+            gpu_backend=gpu_backend,
+            gpu_vram_bytes=gpu_vram_bytes,
+        )
         code = script_gen.get_raw_script()
         _debug(f"script generated chars={len(code)}")
         
