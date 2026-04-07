@@ -67,25 +67,32 @@ print(f"Downloading {{gguf_file}}...")
 model_path = hf_hub_download(repo_id=model_id, filename=gguf_file, token=hf_token)
 
 from llama_cpp import Llama
-print("Loading model...")
-llm = Llama(model_path=model_path, n_ctx=2048)
+print("Loading model...", flush=True)
+_load_start = time.perf_counter()
+llm = Llama(model_path=model_path, n_gpu_layers=-1, n_ctx=4096, verbose=False)
+_load_elapsed = time.perf_counter() - _load_start
+print(f"[HuggingBox] Loaded in {{_load_elapsed:.1f}}s", flush=True)
 
 user_input = os.environ.get("HB_INPUT", "").strip()
 prompt = user_input if user_input else "Q: What is the capital of France? A:"
 
-print(f"Prompt: {{prompt}}")
-print("Running inference...")
+print(f"Prompt: {{prompt}}", flush=True)
+print("Running inference...", flush=True)
 start = time.perf_counter()
-output = llm(prompt, max_tokens=128, echo=True)
+token_count = 0
+collected = []
+for chunk in llm(prompt, max_tokens=256, stream=True):
+    token = chunk["choices"][0]["text"]
+    print(token, end="", flush=True)
+    collected.append(token)
+    token_count += 1
 elapsed = max(time.perf_counter() - start, 1e-9)
-text = output['choices'][0]['text']
-token_count = len(text.split())
+text = "".join(collected)
+tps = token_count / elapsed
+print(f"\\n\\n[HuggingBox] {token_count} tokens · {{elapsed:.1f}}s · {{tps:.1f}} tok/s", flush=True)
 print("HB_RUNTIME:llama_cpp")
 print("HB_METRIC_INFERENCE_SECONDS:" + str(elapsed))
 print("HB_METRIC_TOKENS:" + str(token_count))
-print("\\n" + "="*40)
-print(text)
-print("="*40)
 """
 
     def _onnxruntime_template(self) -> str:
